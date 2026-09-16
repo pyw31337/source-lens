@@ -81,12 +81,25 @@
   function videoEmptyMessage() {
     const k = siteKind();
     if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
-    if (k === 'youtube') return '원클릭 저장: 원본 mp4가 없으면 처음부터 끝까지 자동 녹화합니다.';
-    if (k === 'instagram' || k === 'facebook') return '원클릭 저장: mp4 주소가 있으면 바로 받고, 없으면 재생이 끝날 때 저장합니다.';
-    if (k === 'vimeo') return '원클릭 저장: progressive mp4가 있으면 바로, 없으면 자동 녹화합니다.';
-    if (k === 'tiktok') return '원클릭 저장: playAddr가 있으면 바로 받습니다.';
-    if (k === 'naver' || k === 'kakao' || k === 'daum') return '원클릭 저장: 플레이어 주소 또는 자동 녹화.';
-    return '원클릭 저장을 누르면 파일 주소가 있을 때 바로 받고, 없으면 재생이 끝날 때까지 녹화합니다.';
+    if (k === 'instagram' || k === 'facebook' || k === 'tiktok') {
+      return '이 사이트 영상은 브라우저 확장으로 원본 저장이 불가합니다. 주소가 만료되고 로그인이 묶여 있습니다.';
+    }
+    if (k === 'youtube') return '유튜브 원본 mp4는 확장에서 받을 수 없습니다. 로컬 yt-dlp가 필요합니다.';
+    if (k === 'vimeo') return '프로그레시브 mp4가 있으면 저장됩니다. 없으면 받을 수 없습니다.';
+    if (k === 'naver' || k === 'kakao' || k === 'daum') return '플레이어 파일 주소가 공개된 경우에만 저장됩니다.';
+    return '파일 주소가 없으면 이 탭에서 영상을 저장할 수 없습니다.';
+  }
+
+  function videoLocked() {
+    return ['instagram', 'facebook', 'tiktok'].includes(siteKind());
+  }
+
+  function itemPixel(item) {
+    const url = item?.url || '';
+    const sized = /s(\d{3,4})x(\d{3,4})/i.exec(url);
+    if (sized) return Math.max(Number(sized[1]), Number(sized[2]));
+    if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return 1080;
+    return Math.max(item?.width || 0, item?.height || 0);
   }
 
   function candidate(url, source, hint, extra = {}) {
@@ -479,7 +492,9 @@
   function svgCandidate(svg, source, confidence, extra = {}) {
     if (!svg || svg.closest?.('#sl-host')) return null;
     const r = svg.getBoundingClientRect();
-    if (r.width < 8 || r.height < 8) return null;
+    const w = Math.max(r.width, svg.clientWidth || 0, Number(svg.getAttribute('width')) || 0);
+    const h = Math.max(r.height, svg.clientHeight || 0, Number(svg.getAttribute('height')) || 0);
+    if (!extra.allowTiny && w < 8 && h < 8 && !svg.querySelector('path, circle, polygon, rect')) return null;
     if (!extra.keepUi && isUiSvg(svg, extra.url, svgName(svg))) return null;
     const expanded = expandSvgUses(svg);
     const code = sanitizeSvg(new XMLSerializer().serializeToString(expanded));
@@ -487,7 +502,7 @@
     const fp = svgFingerprint(expanded, code);
     return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, source, 'svg', {
       element: svg, code, confidence, relation: extra.relation || 'page', name,
-      width: Math.round(r.width), height: Math.round(r.height), fp
+      width: Math.round(w || r.width), height: Math.round(h || r.height), fp
     });
   }
 
@@ -495,26 +510,20 @@
     const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg') || target?.querySelector?.('svg');
     const out = [];
     if (clicked) {
-      const item = svgCandidate(clicked, 'inline SVG', '최상', { keepUi: true, relation: 'target' });
+      const item = svgCandidate(clicked, 'inline SVG', '최상', { keepUi: true, allowTiny: true, relation: 'target' });
       if (item) out.push(item);
     }
     return out.filter(Boolean);
   }
 
   function collectPageSvgs() {
-    const social = ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'video'].includes(siteKind());
-    const min = siteProfile().svgMin || 12;
     const out = [];
     const seen = new Set();
     $$('svg').forEach(svg => {
-      const r = svg.getBoundingClientRect();
-      if (Math.min(r.width, r.height) < min) return;
-      if (social && !svg.closest('article, main, [role="main"], [role="dialog"]') && !svg.closest('#sl-host')) {
-        if (!svg.getAttribute('aria-label') && Math.max(r.width, r.height) < 40) return;
-      }
-      const item = svgCandidate(svg, '페이지 SVG', '중간', { keepUi: social });
+      if (svg.closest('#sl-host')) return;
+      const item = svgCandidate(svg, svg.getAttribute('aria-label') || '페이지 SVG', '중간', { keepUi: true, allowTiny: true });
       if (!item) return;
-      const key = item.fp || item.url;
+      const key = item.fp || item.name || item.url;
       if (seen.has(key)) return;
       seen.add(key);
       out.push(item);
@@ -890,7 +899,7 @@
       });
       actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
     }
-    if (item.type === 'video') {
+    if (item.type === 'video' && !videoLocked()) {
       actions.append(actionButton('primary', state.recorder ? '지금 저장' : '원클릭 저장', ev => oneClickSaveVideo(item, ev.currentTarget)));
       actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
     }
@@ -1111,11 +1120,20 @@
       items: payload,
       filename: `source-lens/${location.hostname.replace(/^www\./, '')}-media.zip`
     }, result => {
-      if (button) {
-        button.disabled = false;
-        button.textContent = result?.ok ? `ZIP ${result.count || payload.length}개` : (result?.error || 'ZIP 실패');
-        setTimeout(() => { button.textContent = 'ZIP 저장'; }, 1800);
+      if (result?.ok) {
+        if (button) {
+          button.disabled = false;
+          button.textContent = `ZIP ${result.count || payload.length}개`;
+          setTimeout(() => { button.textContent = 'ZIP 저장'; }, 1800);
+        }
+        return;
       }
+      if (button) button.textContent = 'ZIP 불가 · 개별 저장';
+      payload.forEach((item, i) => {
+        const src = items[i];
+        if (src) setTimeout(() => saveItem(src), i * 320);
+      });
+      if (button) setTimeout(() => { button.disabled = false; button.textContent = 'ZIP 저장'; }, 2400);
     });
   }
 
@@ -1454,7 +1472,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.3</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.4</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1469,39 +1487,35 @@
     const main = $('.sl-main', panel);
     const updateCounts = () => {
       panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
-      panel.querySelector('[data-tab="video"] b').textContent = state.candidates.filter(i => i.type === 'video').length;
+      const videoBtn = panel.querySelector('[data-tab="video"]');
+      if (videoLocked()) videoBtn.innerHTML = '영상 <b>불가</b>';
+      else videoBtn.innerHTML = `영상 <b>${state.candidates.filter(i => i.type === 'video').length}</b>`;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
     };
     const draw = () => {
+      try {
       main.textContent = '';
       const selected = state.picked || state.candidates[0];
       panel.querySelectorAll('.sl-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.activeTab));
       updateCounts();
-      const list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
+      let list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
+      if (state.activeTab === 'video' && videoLocked()) list = [];
+      if (state.activeTab === 'image' && state.filterLarge) {
+        list = list.filter(item => itemPixel(item) >= 400);
+      }
       if (!list.length) {
         const empty = state.activeTab === 'video'
           ? videoEmptyMessage()
           : state.activeTab === 'svg'
-            ? '중복을 제외한 SVG가 없습니다. 아이콘을 직접 Alt+클릭하면 선택됩니다.'
-            : '표시할 미디어가 없습니다.';
+            ? '표시할 SVG가 없습니다. 아이콘을 직접 Alt+클릭해 보세요.'
+            : state.filterLarge
+              ? '400px 이상 이미지가 없습니다. 「작은 것 숨기기」를 끄세요.'
+              : '표시할 미디어가 없습니다.';
         const box = document.createElement('div');
         box.className = 'sl-empty';
         box.textContent = empty;
         main.append(box);
-        if (state.activeTab === 'video') {
-          const bar = document.createElement('div');
-          bar.className = 'sl-bulk';
-          bar.append(actionButton('primary', '원클릭 저장', ev => oneClickSaveVideo(null, ev.currentTarget)));
-          bar.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
-          main.append(bar);
-        }
         return;
-      }
-      if (state.activeTab !== 'selected') {
-        list.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)) || String(b.confidence).length - String(a.confidence).length);
-      }
-      if (state.activeTab === 'image' && state.filterLarge) {
-        list = list.filter(item => !item.width || Math.max(item.width, item.height || 0) >= 400);
       }
       if (state.activeTab === 'selected') {
         const item = list[0];
@@ -1570,8 +1584,17 @@
         const copyAll = document.createElement('button');
         copyAll.type = 'button';
         copyAll.className = 'sl-btn';
-        copyAll.textContent = 'URL 모두 복사';
-        copyAll.onclick = () => copy(list.map(item => item.url).filter(Boolean).join('\n'), copyAll);
+        const signed = ['instagram', 'facebook', 'tiktok'].includes(siteKind());
+        copyAll.textContent = signed ? '게시물 주소 복사' : '이미지 주소 복사';
+        copyAll.title = signed
+          ? 'CDN 주소는 만료되어 URL signature mismatch가 납니다. 게시물 주소를 복사합니다.'
+          : '현재 목록의 파일 주소를 복사합니다.';
+        copyAll.onclick = () => {
+          const urls = signed
+            ? SL.unique([state.postUrl, location.href].filter(Boolean))
+            : list.map(item => item.url).filter(Boolean);
+          copy(urls.join('\n'), copyAll);
+        };
         bar.append(saveAll, copyAll);
         const zipBtn = document.createElement('button');
         zipBtn.type = 'button';
@@ -1583,7 +1606,8 @@
           const large = document.createElement('button');
           large.type = 'button';
           large.className = 'sl-btn' + (state.filterLarge ? ' is-on' : '');
-          large.textContent = '큰 것만';
+          large.textContent = state.filterLarge ? '작은 것 숨기는 중' : '작은 것 숨기기';
+          large.title = '150~320px 썸네일·프로필을 숨깁니다.';
           large.onclick = () => { state.filterLarge = !state.filterLarge; draw(); };
           bar.append(large);
         }
@@ -1614,6 +1638,12 @@
           grid.append(tile);
         });
         main.append(grid);
+      }
+      } catch (error) {
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = `화면을 그리지 못했습니다. ${error.message || error}`;
+        main.append(box);
       }
     };
     panel.querySelectorAll('.sl-tabs button').forEach(btn => {

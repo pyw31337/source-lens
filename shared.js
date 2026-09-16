@@ -95,6 +95,11 @@
       if (/coupangcdn|thumbnail.*coupang/i.test(host + url)) {
         return url.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
       }
+      if (/cdninstagram\.com|fbcdn\.net|scontent/i.test(host)) {
+        return url
+          .replace(/\/s\d{2,4}x\d{2,4}\//g, '/')
+          .replace(/stp=[^&]*/g, s => s.replace(/_s\d{2,4}x\d{2,4}/g, '').replace(/s\d{2,4}x\d{2,4}/g, 's1080x1080'));
+      }
       if (/danawa\.com/i.test(host)) {
         return url.replace(/\/resize\/\d+x\d+\//i, '/').replace(/_[sml](?=\.)/i, '');
       }

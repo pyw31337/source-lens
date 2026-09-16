@@ -14,7 +14,7 @@ async function fetchMedia(url) {
   const errors = [];
   for (const credentials of ['omit', 'include']) {
     try {
-      const response = await fetch(url, { credentials, redirect: 'follow', cache: 'no-store' });
+      const response = await fetch(url, { credentials, redirect: 'follow', cache: 'force-cache', mode: 'cors' });
       if (!response.ok) {
         errors.push(`${credentials}:${response.status}`);
         continue;
@@ -208,10 +208,16 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           } catch { /* skip one */ }
         }
         if (!files.length) {
-          sendResponse({ ok: false, error: '압축할 파일을 받지 못했습니다.' });
+          sendResponse({ ok: false, error: '압축할 파일을 받지 못했습니다. 인스타 CDN은 ZIP이 막혀 있습니다.' });
           return;
         }
         const zip = zipStore(files);
+        const b64 = toBase64(zip.buffer);
+        if (b64.length < 6_000_000) {
+          const result = await downloadBase64('application/zip', b64, message.filename || 'source-lens/media.zip');
+          sendResponse({ ok: result.ok, error: result.error, count: files.length });
+          return;
+        }
         const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
         chrome.downloads.download({
           url,
