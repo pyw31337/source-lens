@@ -1,0 +1,21 @@
+*{box-sizing:border-box}
+body{margin:0;width:390px;color:#17202a;font:13px system-ui,-apple-system,sans-serif;background:#f7f9fc}
+main{padding:14px}
+header{display:flex;align-items:center;gap:10px;margin-bottom:12px}
+header img{width:34px;height:34px;border-radius:8px}
+h1{font-size:16px;margin:0}
+h1 small{color:#64748b;font-size:11px;font-weight:600}
+p{margin:2px 0;color:#64748b;font-size:12px}
+header button{margin-left:auto;border:0;background:transparent;font-size:21px;cursor:pointer;color:#64748b}
+.toolbar{display:flex;justify-content:space-between;align-items:center;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:8px 10px;margin-bottom:8px}
+.toolbar input,.item input{accent-color:#087f5b}
+.item{display:flex;gap:8px;align-items:center;background:#fff;border:1px solid #e2e8f0;border-radius:10px;padding:7px;margin:6px 0}
+.thumb{width:56px;height:56px;border-radius:7px;object-fit:cover;background:#eef2f6}
+.item-body{min-width:0;flex:1}
+.item-url{color:#075985;display:block;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;font-size:11px;margin-top:3px}
+.item-meta{display:block;color:#64748b;font-size:10px;margin-top:3px}
+#list{max-height:405px;overflow:auto}
+footer{display:flex;gap:7px;margin-top:10px}
+footer button{flex:1;border:0;border-radius:8px;padding:9px;background:#087f5b;color:#fff;cursor:pointer;font-weight:600}
+footer button+button{background:#334155}
+#status{min-height:16px;text-align:center}
