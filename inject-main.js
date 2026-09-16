@@ -2,7 +2,8 @@
   if (window.__sourceLensMain) return;
   window.__sourceLensMain = true;
 
-  const videoLike = /(?:\.mp4|\.m4v|\.webm|\.mov|\.m3u8|\.mpd)(?:$|[?#])|videoplayback|googlevideo\.com|\/o1\/v\/|\/t16\/|\/t2\/f2\/|playable_url|browser_native/i;
+  const videoLike = /(?:\.mp4|\.m4v|\.webm|\.mov|\.m3u8|\.mpd)(?:$|[?#])|videoplayback|googlevideo\.com|vimeocdn|player\.vimeo|vod-progressive|akamaized\.net|\/o1\/v\/|\/t(?:15|16|2|30|35|50|66)\/|playable_url|browser_native|video_versions/i;
+
   const notImage = /(?:\.jpe?g|\.png|\.webp|\.gif|\.svg)(?:$|[?#])|_n\.(?:jpe?g|png|webp)/i;
 
   const emit = (url, via) => {
