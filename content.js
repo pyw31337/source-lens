@@ -802,41 +802,6 @@
     uiRoot().append(layer);
   }
 
-  function suggestSliceCuts(image) {
-    const w = 160;
-    const scale = w / Math.max(1, image.naturalWidth);
-    const h = Math.max(1, Math.round(image.naturalHeight * scale));
-    const canvas = document.createElement('canvas');
-    canvas.width = w;
-    canvas.height = h;
-    const ctx = canvas.getContext('2d', { willReadFrequently: true });
-    ctx.drawImage(image, 0, 0, w, h);
-    const { data } = ctx.getImageData(0, 0, w, h);
-    const energy = new Float32Array(h);
-    for (let y = 0; y < h; y++) {
-      let sum = 0;
-      for (let x = 0; x < w; x++) {
-        const i = (y * w + x) * 4;
-        const p = y ? ((y - 1) * w + x) * 4 : i;
-        sum += Math.abs(data[i] - data[p]) + Math.abs(data[i + 1] - data[p + 1]) + Math.abs(data[i + 2] - data[p + 2]);
-      }
-      energy[y] = sum / w;
-    }
-    const avg = energy.reduce((a, b) => a + b, 0) / h;
-    const minGap = Math.max(28, Math.round(h * 0.025));
-    const cuts = [];
-    for (let y = minGap; y < h - minGap; y++) {
-      if (energy[y] > avg * 0.22) continue;
-      let min = energy[y], at = y;
-      while (y < h - minGap && energy[y] < avg * 0.28) {
-        if (energy[y] < min) { min = energy[y]; at = y; }
-        y += 1;
-      }
-      if (!cuts.length || at - cuts[cuts.length - 1] > minGap) cuts.push(at);
-    }
-    return cuts.map(y => y / h).filter(p => p > 0.02 && p < 0.98).slice(0, 28);
-  }
-
   async function openSliceEditor(item) {
     let blob;
     try {
@@ -1031,7 +996,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.8</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.9</small></h2>
+
 
 
 
