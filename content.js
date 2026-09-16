@@ -188,6 +188,54 @@
     }
   }
 
+  function isLightPaint(value) {
+    const v = String(value || '').trim().toLowerCase();
+    if (!v || v === 'currentcolor' || v === 'inherit' || v === 'white' || v === '#fff' || v === '#ffffff' || v === '#fefefe' || v === 'rgb(255,255,255)') return true;
+    if (v === 'none' || /^url\(/i.test(v)) return false;
+    const hex = v.match(/^#([0-9a-f]{3,8})$/i);
+    if (hex) {
+      let h = hex[1];
+      if (h.length === 3 || h.length === 4) h = h.split('').map(c => c + c).join('').slice(0, 6);
+      const r = parseInt(h.slice(0, 2), 16), g = parseInt(h.slice(2, 4), 16), b = parseInt(h.slice(4, 6), 16);
+      return (r + g + b) / 3 > 186;
+    }
+    const rgb = v.match(/rgba?\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)/);
+    if (rgb) return (Number(rgb[1]) + Number(rgb[2]) + Number(rgb[3])) / 3 > 186;
+    return false;
+  }
+
+  function previewSvg(code) {
+    const sanitized = sanitizeSvg(code);
+    try {
+      const doc = new DOMParser().parseFromString(sanitized, 'image/svg+xml');
+      const root = doc.documentElement;
+      root.setAttribute('color', '#111111');
+      if (!root.getAttribute('stroke') && !root.getAttribute('fill')) {
+        root.setAttribute('fill', 'none');
+        root.setAttribute('stroke', '#111111');
+        if (!root.getAttribute('stroke-width')) root.setAttribute('stroke-width', '1.8');
+        root.setAttribute('stroke-linecap', 'round');
+        root.setAttribute('stroke-linejoin', 'round');
+      }
+      root.querySelectorAll('*').forEach(el => {
+        ['fill', 'stroke'].forEach(attr => {
+          const v = el.getAttribute(attr);
+          if (v && v !== 'none' && !/^url\(/i.test(v) && isLightPaint(v)) el.setAttribute(attr, '#111111');
+        });
+        const style = el.getAttribute('style');
+        if (style) {
+          el.setAttribute('style', style
+            .replace(/fill\s*:\s*(?!none)(?!url)[^;]+/ig, m => /none/i.test(m) ? m : 'fill:#111111')
+            .replace(/stroke\s*:\s*(?!none)(?!url)[^;]+/ig, m => /none/i.test(m) ? m : 'stroke:#111111')
+            .replace(/color\s*:\s*[^;]+/ig, 'color:#111111'));
+        }
+      });
+      return new XMLSerializer().serializeToString(root);
+    } catch {
+      return sanitized;
+    }
+  }
+
   function sanitizeSvg(code) {
     try {
       const doc = new DOMParser().parseFromString(code, 'image/svg+xml');
@@ -555,7 +603,8 @@
     if (item.type === 'svg' && item.code) {
       const holder = document.createElement('div');
       holder.className = `sl-svg-media ${className || ''}`;
-      holder.innerHTML = sanitizeSvg(item.code);
+      holder.innerHTML = previewSvg(item.code);
+
       return holder;
     }
     if (!item.url || (/^data:/i.test(item.url) && item.type !== 'svg')) return null;
@@ -996,7 +1045,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.9</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.10</small></h2>
+
 
 
 
