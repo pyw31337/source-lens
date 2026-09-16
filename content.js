@@ -598,7 +598,45 @@
       });
     }).filter(Boolean);
     const svgs = collectPageSvgs();
-    return [...images, ...videos, ...svgs, ...collectCatalogMedia()];
+    return [...images, ...videos, ...svgs, ...collectCatalogMedia(), ...collectSiteExtras()];
+  }
+
+  function collectSiteExtras() {
+    const kind = siteKind();
+    const out = [];
+    const push = (url, source, extra = {}) => {
+      const item = candidate(url, source, extra.hint || 'image', extra);
+      if (item) out.push(item);
+    };
+    if (kind === 'community' || /dcinside|ygosu|humoruniv|etoland|arca\.live|ppomppu|aagag/i.test(location.hostname)) {
+      $$('.writing_view_box img, .usertxt img, .gallview_contents img, .se-main-container img, #writeDiv img, .article-board img, .board-contents img, .view_content img, .td_article img').forEach(img => {
+        const url = img.currentSrc || img.src || img.getAttribute('data-original') || img.getAttribute('data-src');
+        if (url) push(url, '본문 이미지', { element: img, confidence: '높음' });
+      });
+      $$('img[src*="viewimage.php"], img[src*="dcimg"], img[src*="namu.la"], img[src*="ygosu.com"], img[src*="humoruniv"]').forEach(img => {
+        push(img.currentSrc || img.src, '커뮤니티 CDN', { element: img, confidence: '높음' });
+      });
+    }
+    if (kind === 'naver' || /blog\.naver|post\.naver|news\.naver|cafe\.naver/i.test(location.hostname + location.pathname)) {
+      $$('.se-image-resource, .se-module-image img, img._image, .se-component img, #postViewArea img').forEach(img => {
+        const url = img.getAttribute('data-lazy-src') || img.currentSrc || img.src;
+        if (url) push(url, '네이버 본문', { element: img, confidence: '최상' });
+      });
+    }
+    if (kind === 'instagram' || kind === 'facebook') {
+      $$('article img, article video, [role="dialog"] img, [role="dialog"] video').forEach(node => {
+        const url = node.currentSrc || node.src;
+        if (url) push(url, '게시물 미디어', { element: node, hint: node.tagName === 'VIDEO' ? 'video' : 'image', confidence: '최상' });
+      });
+    }
+    if (kind === 'design' || kind === 'stock') {
+      $$('img[srcset], source[srcset]').forEach(node => {
+        const parts = (node.srcset || node.getAttribute('srcset') || '').split(',').map(p => p.trim()).filter(Boolean);
+        const last = parts[parts.length - 1]?.split(/\s+/)[0];
+        if (last) push(last, 'srcset 최대', { confidence: '최상' });
+      });
+    }
+    return out;
   }
 
   function collectCatalogMedia() {
@@ -1173,21 +1211,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.5.3</small></h2>
-
-
-
-
-
-
-
-
-
-
-
-
-
-
+          <h2>Source Lens <small class="sl-ver">0.5.4</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1212,7 +1236,6 @@
       updateCounts();
       const list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
       if (!list.length) {
-      if (!list.length) {
         const empty = state.activeTab === 'video'
           ? videoEmptyMessage()
           : state.activeTab === 'svg'
@@ -1221,7 +1244,8 @@
         main.innerHTML = `<div class="sl-empty">${empty}</div>`;
         return;
       }
-
+      if (state.activeTab !== 'selected') {
+        list.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)) || String(b.confidence).length - String(a.confidence).length);
       }
       if (state.activeTab === 'selected') {
         const item = list[0];
@@ -1272,6 +1296,36 @@
         hydrateMeta(item, card);
         main.append(card);
       } else {
+        const bar = document.createElement('div');
+        bar.className = 'sl-bulk';
+        const saveAll = document.createElement('button');
+        saveAll.type = 'button';
+        saveAll.className = 'sl-btn';
+        saveAll.textContent = `모두 저장 (${Math.min(list.length, 40)})`;
+        saveAll.onclick = async () => {
+          saveAll.disabled = true;
+          for (const item of list.slice(0, 40)) {
+            saveItem(item);
+            await new Promise(r => setTimeout(r, 280));
+          }
+          saveAll.textContent = '저장 요청 완료';
+          saveAll.disabled = false;
+        };
+        bar.append(saveAll);
+        if (state.activeTab === 'svg') {
+          const copyAll = document.createElement('button');
+          copyAll.type = 'button';
+          copyAll.className = 'sl-btn';
+          copyAll.textContent = '코드 모두 복사';
+          copyAll.onclick = async () => {
+            const codes = list.map(item => svgSource(item)).filter(Boolean);
+            if (!codes.length) return;
+            await navigator.clipboard.writeText(codes.join('\n\n'));
+            copyAll.textContent = `${codes.length}개 복사됨`;
+          };
+          bar.append(copyAll);
+        }
+        main.append(bar);
         const grid = document.createElement('div');
         grid.className = 'sl-grid';
         list.forEach((item, index) => {
@@ -1328,6 +1382,7 @@
     }
     extras.push(...(state.platformMedia || []));
     if (isCommerce()) extras.push(...collectCommerce());
+    extras.push(...collectSiteExtras());
     extras.push(...collectInlineSvg(target));
     if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
     if (!clickedSvg) extras.push(...collectArticle(target));
