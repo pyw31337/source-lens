@@ -897,11 +897,19 @@
     return btn;
   }
 
+  function liveUrl(item) {
+    if (!item) return '';
+    if (item.temporary) return state.postUrl || item.url || '';
+    const src = item.element?.currentSrc;
+    if (src && /^https?:/i.test(src)) return src;
+    return item.url || '';
+  }
+
   function fillItemActions(actions, item, extra = {}) {
-    actions.append(actionButton('primary', 'URL 복사', ev => copy(item.temporary ? (state.postUrl || item.url) : item.url, ev.currentTarget)));
+    actions.append(actionButton('primary', 'URL 복사', ev => copy(liveUrl(item), ev.currentTarget)));
     actions.append(actionButton('primary', '저장', () => saveItem(item)));
     if (extra.onUrl) actions.append(actionButton('normal', extra.urlLabel || 'URL 보기', extra.onUrl));
-    actions.append(actionButton('normal', '새 탭', () => window.open(item.temporary ? (state.postUrl || item.url) : item.url, '_blank', 'noopener')));
+    actions.append(actionButton('normal', '새 탭', () => window.open(liveUrl(item), '_blank', 'noopener')));
     if (item.type === 'svg') {
       actions.append(actionButton('primary', '코드 복사', ev => copySvg(item, ev.currentTarget)));
       if (extra.onCodeView) actions.append(actionButton('normal', '코드 보기', extra.onCodeView));
@@ -1157,7 +1165,7 @@
       return;
     }
     const name = downloadName(item);
-    const url = (item.element?.currentSrc && /^https?:/i.test(item.element.currentSrc)) ? item.element.currentSrc : item.url;
+    const url = liveUrl(item);
     if (/^https?:/i.test(url) && !item.temporary) {
       chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `source-lens/${name}` }, result => {
         if (result?.ok) return;
@@ -1489,7 +1497,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.5</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.6</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1560,7 +1568,7 @@
             }
             const code = document.createElement('code');
             code.className = 'sl-url-value';
-            code.textContent = item.temporary ? (state.postUrl || item.url) : item.url;
+            code.textContent = liveUrl(item);
             card.append(code);
             ev.currentTarget.textContent = 'URL 숨기기';
           },

@@ -185,7 +185,10 @@
   function koreanPortals() {
     document.querySelectorAll('.se-image-resource, img._image, .link_thumb img, .thumb_vf img, .article_view img').forEach(img => {
       const url = img.currentSrc || img.src || img.getAttribute('data-src') || img.getAttribute('data-lazy-src');
-      if (url) push(url.replace(/[?&]type=w\d+/i, '?type=w2000'), 'image', '포털 본문');
+      if (url) {
+        if (/shop-phinf\.pstatic\.net/i.test(url)) push(url, 'image', '포털 본문');
+        else push(url.replace(/[?&]type=w\d+/i, m => m[0] === '?' ? '?type=w966' : m), 'image', '포털 본문');
+      }
     });
     document.querySelectorAll('video').forEach(video => {
       push(video.currentSrc || video.src, 'video', 'video 요소');

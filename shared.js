@@ -89,10 +89,12 @@
       if (/behance\.net|behance\.net|mir-s3-cdn-cf\.behance/i.test(host)) {
         return url.replace(/\/fs\/\d+\//, '/fs/source/').replace(/\/[0-9]+x[0-9]+\//, '/');
       }
-      if (/pstatic\.net|naver\.net/i.test(host)) {
-        u.searchParams.set('type', 'w2000');
-        return u.href.replace(/[?&]type=w\d+/ig, m => m.startsWith('?') ? '?type=w2000' : '&type=w2000');
+      if (/shop-phinf\.pstatic\.net|shopping-phinf/i.test(host)) return url;
+      if (/(?:blogfiles|postfiles|cafefiles)\.pstatic\.net/i.test(host)) {
+        u.searchParams.set('type', 'w966');
+        return u.href;
       }
+      if (/pstatic\.net|naver\.net/i.test(host)) return url;
       if (/coupangcdn|thumbnail.*coupang/i.test(host + url)) {
         return url.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
       }
@@ -101,7 +103,6 @@
       }
     } catch { /* keep */ }
     return url
-      .replace(/([?&])type=w\d+/ig, '$1type=w2000')
       .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
       .replace(/_[a-z]?thum{1,2}(?=\.)/i, '');
   };
