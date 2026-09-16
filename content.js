@@ -80,12 +80,12 @@
   function videoEmptyMessage() {
     const k = siteKind();
     if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
-    if (k === 'youtube') return '유튜브는 원본 mp4가 없습니다. 영상을 재생한 뒤 「재생 중 저장」하면 WebM으로 녹화됩니다. 원본은 yt-dlp가 필요합니다.';
-    if (k === 'instagram' || k === 'facebook') return '로그인된 게시물에서 JSON mp4가 있으면 저장됩니다. 없으면 재생 중 저장으로 녹화하세요.';
-    if (k === 'vimeo') return '프로그레시브 mp4가 있으면 바로 저장됩니다. 없으면 재생 중 저장을 쓰세요.';
-    if (k === 'tiktok') return '틱톡 playAddr mp4가 있으면 저장됩니다. 주소는 수 시간 내 만료됩니다.';
-    if (k === 'naver' || k === 'kakao' || k === 'daum') return '플레이어가 로드된 뒤 Alt+클릭하거나, 재생 중 저장으로 녹화하세요.';
-    return '파일 주소가 없으면 영상을 재생한 뒤 「재생 중 저장」을 쓰세요.';
+    if (k === 'youtube') return '원클릭 저장: 원본 mp4가 없으면 처음부터 끝까지 자동 녹화합니다.';
+    if (k === 'instagram' || k === 'facebook') return '원클릭 저장: mp4 주소가 있으면 바로 받고, 없으면 재생이 끝날 때 저장합니다.';
+    if (k === 'vimeo') return '원클릭 저장: progressive mp4가 있으면 바로, 없으면 자동 녹화합니다.';
+    if (k === 'tiktok') return '원클릭 저장: playAddr가 있으면 바로 받습니다.';
+    if (k === 'naver' || k === 'kakao' || k === 'daum') return '원클릭 저장: 플레이어 주소 또는 자동 녹화.';
+    return '원클릭 저장을 누르면 파일 주소가 있을 때 바로 받고, 없으면 재생이 끝날 때까지 녹화합니다.';
   }
 
   function candidate(url, source, hint, extra = {}) {
@@ -832,7 +832,7 @@
       actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
     }
     if (item.type === 'video' || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver'].includes(siteKind())) {
-      actions.append(actionButton('primary', state.recorder ? '녹화 중지·저장' : '재생 중 저장', ev => capturePlaying(item, ev.currentTarget)));
+      actions.append(actionButton('primary', state.recorder ? '지금 저장' : '원클릭 저장', ev => oneClickSaveVideo(item, ev.currentTarget)));
       actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
     }
   }
@@ -853,16 +853,53 @@
     return `yt-dlp --cookies-from-browser chrome -f "bv*+ba/b" --no-mtime "${url}"`;
   }
 
-  async function capturePlaying(item, button) {
+  function fmtClock(s) {
+    s = Math.max(0, Math.floor(Number(s) || 0));
+    return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  function captureHud(text) {
+    let hud = uiRoot().querySelector('.sl-capture-hud');
+    if (!text) { hud?.remove(); return; }
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.className = 'sl-capture-hud';
+      hud.onclick = () => { try { state.recorder?.stop(); } catch { /* ignore */ } };
+      uiRoot().append(hud);
+    }
+    hud.textContent = text;
+  }
+
+  function directVideoItem() {
+    const pool = [...(state.candidates || []), ...(state.platformMedia || []), ...collectPageMedia()];
+    return pool.find(i => i?.type === 'video' && /^https?:/i.test(i.url) && !i.temporary && !SL.isManifest(i.url) && !SL.isImageUrl(i.url));
+  }
+
+  async function oneClickSaveVideo(item, button) {
+    const setLabel = text => { if (button) button.textContent = text; };
     if (state.recorder) {
       try { state.recorder.stop(); } catch { /* ignore */ }
-      return;
+      setLabel('저장 중…');
+      return { ok: true, mode: 'stop' };
+    }
+    document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now'));
+    await new Promise(r => setTimeout(r, 400));
+    const file = (item?.type === 'video' && /^https?:/i.test(item.url) && !item.temporary && !SL.isManifest(item.url) && !SL.isImageUrl(item.url))
+      ? item
+      : directVideoItem();
+    if (file) {
+      saveItem(file);
+      setLabel('파일 저장 시작');
+      captureHud('원본 주소로 저장했습니다');
+      setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 1800);
+      return { ok: true, mode: 'file' };
     }
     const video = pickCaptureVideo(item);
     if (!video) {
-      button.textContent = '재생 중인 영상 없음';
-      setTimeout(() => { button.textContent = '재생 중 저장'; }, 1600);
-      return;
+      setLabel('영상 없음');
+      captureHud('재생할 영상을 먼저 열어 주세요');
+      setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 2000);
+      return { ok: false, error: '페이지에 영상이 없습니다. 영상을 연 다음 다시 눌러 주세요.' };
     }
     const src = video.currentSrc || video.src || '';
     if (/^blob:/i.test(src)) {
@@ -870,35 +907,48 @@
         const blob = await fetch(src).then(r => r.blob());
         if (blob && blob.size > 80_000) {
           downloadBlob(blob, `video-${Date.now()}.webm`);
-          button.textContent = 'blob 저장됨';
-          setTimeout(() => { button.textContent = '재생 중 저장'; }, 1600);
-          return;
+          setLabel('저장됨');
+          return { ok: true, mode: 'blob' };
         }
-      } catch { /* MSE blob — record instead */ }
+      } catch { /* MSE — record */ }
     }
     const stream = video.captureStream?.() || video.mozCaptureStream?.();
     if (!stream || !stream.getTracks().length) {
-      button.textContent = '이 플레이어는 녹화 불가';
-      setTimeout(() => { button.textContent = '재생 중 저장'; }, 1800);
-      return;
+      setLabel('녹화 불가');
+      return { ok: false, error: '이 플레이어는 브라우저 녹화가 막혀 있습니다.' };
     }
-    if (video.paused) {
-      try { await video.play(); } catch { /* user gesture may be enough */ }
+    const live = !Number.isFinite(video.duration) || video.duration > 4 * 3600;
+    if (!live && video.currentTime > 1) {
+      try { video.currentTime = 0; } catch { /* ignore */ }
     }
+    try { await video.play(); } catch { /* ignore */ }
     const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
       .find(type => MediaRecorder.isTypeSupported(type)) || '';
     const chunks = [];
-    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : undefined);
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined);
+    const onEnded = () => { try { rec.stop(); } catch { /* ignore */ } };
     rec.ondataavailable = ev => { if (ev.data && ev.data.size) chunks.push(ev.data); };
     rec.onstop = () => {
+      video.removeEventListener('ended', onEnded);
+      clearInterval(state.captureTimer);
       state.recorder = null;
-      button.textContent = '재생 중 저장';
+      captureHud(chunks.length ? '저장했습니다' : '녹화 데이터가 없습니다');
+      setLabel('원클릭 저장');
+      setTimeout(() => captureHud(''), 1800);
       if (!chunks.length) return;
       downloadBlob(new Blob(chunks, { type: rec.mimeType || 'video/webm' }), `capture-${Date.now()}.webm`);
     };
-    rec.start(1000);
+    video.addEventListener('ended', onEnded);
+    rec.start(500);
     state.recorder = rec;
-    button.textContent = '녹화 중… 누르면 저장';
+    state.captureTimer = setInterval(() => {
+      const d = video.duration;
+      const t = video.currentTime;
+      const pct = Number.isFinite(d) && d > 0 ? Math.round((t / d) * 100) : 0;
+      captureHud(live ? `녹화 중 ${fmtClock(t)} · 클릭하면 저장` : `자동 저장 ${fmtClock(t)} / ${fmtClock(d)} (${pct}%)`);
+      setLabel(live ? '지금 저장' : `${pct}%`);
+    }, 400);
+    return { ok: true, mode: live ? 'live' : 'record' };
   }
 
 
@@ -1281,7 +1331,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.6.0</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.6.1</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1318,7 +1368,7 @@
         if (state.activeTab === 'video') {
           const bar = document.createElement('div');
           bar.className = 'sl-bulk';
-          bar.append(actionButton('primary', '재생 중 저장', ev => capturePlaying(null, ev.currentTarget)));
+          bar.append(actionButton('primary', '원클릭 저장', ev => oneClickSaveVideo(null, ev.currentTarget)));
           bar.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
           main.append(bar);
         }
@@ -1510,6 +1560,7 @@
     }
     render();
     requestFrameMedia();
+    if (clickedVideo) oneClickSaveVideo(state.picked);
   }
 
   window.addEventListener('mousedown', ev => {
@@ -1566,6 +1617,10 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message?.type === 'listImages' || message?.type === 'listPageMedia') {
       sendResponse(listPageMedia());
+      return true;
+    }
+    if (message?.type === 'oneClickVideo') {
+      oneClickSaveVideo(null, null).then(sendResponse);
       return true;
     }
     if (message?.type !== 'contextInspect') return;

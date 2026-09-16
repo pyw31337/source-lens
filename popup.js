@@ -59,4 +59,16 @@ $('#download').onclick = () => {
   }, () => void api.runtime.lastError));
   $('#status').textContent = `${items.length}개 다운로드를 시작했습니다.`;
 };
+$('#oneClickVideo').onclick = async () => {
+  const tabs = await tabsQuery({ active: true, currentWindow: true });
+  const tab = tabs[0];
+  if (!tab) return;
+  $('#status').textContent = '저장 준비 중…';
+  const result = await send(tab.id, { type: 'oneClickVideo' });
+  if (result.ok && result.mode === 'file') $('#status').textContent = '원본 파일 저장을 시작했습니다.';
+  else if (result.ok && result.mode === 'blob') $('#status').textContent = '영상을 저장했습니다.';
+  else if (result.ok && result.mode === 'live') $('#status').textContent = '라이브 녹화 중. 페이지의 검은 바를 누르면 저장됩니다.';
+  else if (result.ok) $('#status').textContent = '재생이 끝나면 자동 저장됩니다. 탭을 유지하세요.';
+  else $('#status').textContent = result.error || '영상을 찾지 못했습니다. 영상을 재생한 뒤 다시 눌러 주세요.';
+};
 load();
