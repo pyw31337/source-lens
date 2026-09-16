@@ -81,6 +81,8 @@
     if (SL.MEDIA_EXT.test(url)) return true;
     if (/googlevideo\.com|videoplayback/i.test(url)) return true;
     if (/vimeocdn\.com|player\.vimeo\.com|vod-progressive|akamaized\.net\/.*\.(?:mp4|m3u8)/i.test(url)) return true;
+    if (/tiktokcdn|muscdn\.com|bytevod|tiktok\.com\/aweme/i.test(url)) return true;
+    if (/\.pstatic\.net\/.*(mp4|hls)|tvnaver|kakaocdn\.net.*(?:mp4|m3u8)|daumcdn\.net.*(?:mp4|m3u8)/i.test(url)) return true;
     if (/\/o1\/v\//i.test(url)) return true;
     if (/(?:cdninstagram|fbcdn|scontent).*(?:\/t(?:15|16|2|30|35|50|66)\/|\/t2\/f2\/|\/v\/t(?:15|16|2|30|35|50|66)\/)/i.test(url) && !SL.PHOTO_EXT.test(url)) return true;
     if (/\.mp4(?:$|[?#])/i.test(url)) return true;

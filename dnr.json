@@ -40,5 +40,47 @@
       "urlFilter": "||fbcdn.net",
       "resourceTypes": ["xmlhttprequest", "other", "image", "media"]
     }
+  },
+  {
+    "id": 4,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://www.youtube.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||googlevideo.com",
+      "resourceTypes": ["xmlhttprequest", "other", "media"]
+    }
+  },
+  {
+    "id": 5,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://www.tiktok.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||tiktokcdn.com",
+      "resourceTypes": ["xmlhttprequest", "other", "media"]
+    }
+  },
+  {
+    "id": 6,
+    "priority": 1,
+    "action": {
+      "type": "modifyHeaders",
+      "requestHeaders": [
+        { "header": "Referer", "operation": "set", "value": "https://tv.naver.com/" }
+      ]
+    },
+    "condition": {
+      "urlFilter": "||pstatic.net",
+      "resourceTypes": ["xmlhttprequest", "other", "image", "media"]
+    }
   }
 ]

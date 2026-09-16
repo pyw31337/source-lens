@@ -6,7 +6,7 @@
   const state = {
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
     candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
-    profile: null, observer: null, scanTimer: 0, redraw: null
+    profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: []
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -50,6 +50,10 @@
     if (host.endsWith('instagram.com')) return 'instagram';
     if (host.endsWith('facebook.com') || host === 'fb.watch') return 'facebook';
     if (host.endsWith('vimeo.com') || host.endsWith('vimeocdn.com')) return 'vimeo';
+    if (host.endsWith('tiktok.com')) return 'tiktok';
+    if (host.endsWith('naver.com')) return 'naver';
+    if (host.endsWith('kakao.com') || host.endsWith('kakaocdn.net')) return 'kakao';
+    if (host.endsWith('daum.net') || host.endsWith('daumcdn.net')) return 'daum';
     if (/gmarket\.co\.kr|auction\.co\.kr|coupang\.com|11st\.co\.kr|smartstore\.naver|shopping\.naver|brand\.naver|tmon\.co\.kr|wemakeprice|ssg\.com|lotteon\.com/.test(host)) return 'commerce';
     return host;
   }
@@ -77,7 +81,8 @@
     if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
     if (k === 'youtube') return '유튜브는 영상을 잘게 나눠 스트리밍해서, 하나의 mp4 주소가 없습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
     if (k === 'instagram' || k === 'facebook') return '인스타/페이스북 영상은 blob(임시 주소)로 재생됩니다. 영상이 재생 중일 때 화면을 Alt+클릭해야 잡을 수 있고, 탭을 닫으면 사라집니다.';
-    if (k === 'vimeo') return '비메오도 스트리밍 조각으로 재생되는 경우가 많습니다. 재생 중일 때 플레이어를 Alt+클릭하세요.';
+    if (k === 'tiktok') return '틱톡은 playAddr mp4를 페이지 JSON에서 찾습니다. 영상 페이지에서 Alt+클릭하세요. 주소는 수 시간 내 만료됩니다.';
+    if (k === 'naver' || k === 'kakao' || k === 'daum') return '포털 영상은 본문 플레이어가 로드된 뒤 Alt+클릭해야 파일 주소를 찾습니다.';
     return '이 페이지에서 영상 파일을 찾지 못했습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
   }
 
@@ -306,6 +311,31 @@
     }
     return { media, candidates: out.filter(Boolean) };
   }
+
+  document.documentElement.addEventListener('sl-platform-media', event => {
+    const detail = event.detail || {};
+    const items = [];
+    (detail.videos || []).forEach(row => {
+      const item = candidate(row.url, row.source || '플랫폼 영상', 'video', { confidence: '높음', relation: 'platform' });
+      if (item) items.push(item);
+    });
+    (detail.images || []).forEach(row => {
+      const item = candidate(row.url, row.source || '플랫폼 이미지', 'image', { confidence: '중간', relation: 'platform' });
+      if (item && SL.isImageUrl(item.url)) items.push(item);
+    });
+    state.platformMedia = dedupe([...(state.platformMedia || []), ...items]);
+    if (state.panel && items.length) {
+      const have = new Set(state.candidates.map(itemKey));
+      state.platformMedia.forEach(item => {
+        const key = itemKey(item);
+        if (!have.has(key)) {
+          have.add(key);
+          state.candidates.push(item);
+        }
+      });
+      state.redraw?.();
+    }
+  });
 
   document.documentElement.addEventListener('sl-media-url', event => {
     const url = event.detail?.url;
@@ -1097,7 +1127,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.11</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.5.0</small></h2>
+
 
 
 
@@ -1232,6 +1263,8 @@
 
   async function inspect(target, seed = []) {
     if (!target) return;
+    document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now', { bubbles: true }));
+    await new Promise(resolve => setTimeout(resolve, 80));
 
     const collected = collectTarget(target);
     state.selected = target;
@@ -1241,7 +1274,10 @@
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);
     const extras = [];
-    if (clickedVideo || siteKind() === 'youtube' || siteKind() === 'vimeo') extras.push(...collectRecentVideos(collected.media));
+    if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum'].includes(siteKind())) {
+      extras.push(...collectRecentVideos(collected.media));
+    }
+    extras.push(...(state.platformMedia || []));
     if (isCommerce()) extras.push(...collectCommerce());
     extras.push(...collectInlineSvg(target));
     if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
@@ -1269,7 +1305,7 @@
     }
     state.picked = list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
 
-    state.candidates = dedupe([...list, ...collectPageMedia()]);
+    state.candidates = dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
     state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
       try {
