@@ -80,11 +80,12 @@
   function videoEmptyMessage() {
     const k = siteKind();
     if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
-    if (k === 'youtube') return '유튜브는 영상을 잘게 나눠 스트리밍해서, 하나의 mp4 주소가 없습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
-    if (k === 'instagram' || k === 'facebook') return '인스타/페이스북 영상은 blob(임시 주소)로 재생됩니다. 영상이 재생 중일 때 화면을 Alt+클릭해야 잡을 수 있고, 탭을 닫으면 사라집니다.';
-    if (k === 'tiktok') return '틱톡은 playAddr mp4를 페이지 JSON에서 찾습니다. 영상 페이지에서 Alt+클릭하세요. 주소는 수 시간 내 만료됩니다.';
-    if (k === 'naver' || k === 'kakao' || k === 'daum') return '포털 영상은 본문 플레이어가 로드된 뒤 Alt+클릭해야 파일 주소를 찾습니다.';
-    return '이 페이지에서 영상 파일을 찾지 못했습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
+    if (k === 'youtube') return '유튜브는 원본 mp4가 없습니다. 영상을 재생한 뒤 「재생 중 저장」하면 WebM으로 녹화됩니다. 원본은 yt-dlp가 필요합니다.';
+    if (k === 'instagram' || k === 'facebook') return '로그인된 게시물에서 JSON mp4가 있으면 저장됩니다. 없으면 재생 중 저장으로 녹화하세요.';
+    if (k === 'vimeo') return '프로그레시브 mp4가 있으면 바로 저장됩니다. 없으면 재생 중 저장을 쓰세요.';
+    if (k === 'tiktok') return '틱톡 playAddr mp4가 있으면 저장됩니다. 주소는 수 시간 내 만료됩니다.';
+    if (k === 'naver' || k === 'kakao' || k === 'daum') return '플레이어가 로드된 뒤 Alt+클릭하거나, 재생 중 저장으로 녹화하세요.';
+    return '파일 주소가 없으면 영상을 재생한 뒤 「재생 중 저장」을 쓰세요.';
   }
 
   function candidate(url, source, hint, extra = {}) {
@@ -830,7 +831,76 @@
       });
       actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
     }
+    if (item.type === 'video' || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver'].includes(siteKind())) {
+      actions.append(actionButton('primary', state.recorder ? '녹화 중지·저장' : '재생 중 저장', ev => capturePlaying(item, ev.currentTarget)));
+      actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
+    }
   }
+
+  function pageVideos() {
+    return $$('video').filter(v => !v.closest('#sl-host') && Math.max(v.videoWidth || 0, v.offsetWidth || 0) >= 80);
+  }
+
+  function pickCaptureVideo(item) {
+    if (item?.element?.tagName === 'VIDEO') return item.element;
+    return pageVideos().find(v => !v.paused && v.readyState >= 2)
+      || pageVideos().sort((a, b) => (b.videoWidth * b.videoHeight) - (a.videoWidth * a.videoHeight))[0]
+      || null;
+  }
+
+  function ytdlpCommand() {
+    const url = state.postUrl || location.href;
+    return `yt-dlp --cookies-from-browser chrome -f "bv*+ba/b" --no-mtime "${url}"`;
+  }
+
+  async function capturePlaying(item, button) {
+    if (state.recorder) {
+      try { state.recorder.stop(); } catch { /* ignore */ }
+      return;
+    }
+    const video = pickCaptureVideo(item);
+    if (!video) {
+      button.textContent = '재생 중인 영상 없음';
+      setTimeout(() => { button.textContent = '재생 중 저장'; }, 1600);
+      return;
+    }
+    const src = video.currentSrc || video.src || '';
+    if (/^blob:/i.test(src)) {
+      try {
+        const blob = await fetch(src).then(r => r.blob());
+        if (blob && blob.size > 80_000) {
+          downloadBlob(blob, `video-${Date.now()}.webm`);
+          button.textContent = 'blob 저장됨';
+          setTimeout(() => { button.textContent = '재생 중 저장'; }, 1600);
+          return;
+        }
+      } catch { /* MSE blob — record instead */ }
+    }
+    const stream = video.captureStream?.() || video.mozCaptureStream?.();
+    if (!stream || !stream.getTracks().length) {
+      button.textContent = '이 플레이어는 녹화 불가';
+      setTimeout(() => { button.textContent = '재생 중 저장'; }, 1800);
+      return;
+    }
+    if (video.paused) {
+      try { await video.play(); } catch { /* user gesture may be enough */ }
+    }
+    const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
+      .find(type => MediaRecorder.isTypeSupported(type)) || '';
+    const chunks = [];
+    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 6_000_000 } : undefined);
+    rec.ondataavailable = ev => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = () => {
+      state.recorder = null;
+      button.textContent = '재생 중 저장';
+      if (!chunks.length) return;
+      downloadBlob(new Blob(chunks, { type: rec.mimeType || 'video/webm' }), `capture-${Date.now()}.webm`);
+    };
+    rec.start(1000);
+    state.recorder = rec;
+    button.textContent = '녹화 중… 누르면 저장';
+  }
+
 
   function bytesToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -1211,7 +1281,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.5.4</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.6.0</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1241,7 +1311,17 @@
           : state.activeTab === 'svg'
             ? '중복을 제외한 SVG가 없습니다. 아이콘을 직접 Alt+클릭하면 선택됩니다.'
             : '표시할 미디어가 없습니다.';
-        main.innerHTML = `<div class="sl-empty">${empty}</div>`;
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = empty;
+        main.append(box);
+        if (state.activeTab === 'video') {
+          const bar = document.createElement('div');
+          bar.className = 'sl-bulk';
+          bar.append(actionButton('primary', '재생 중 저장', ev => capturePlaying(null, ev.currentTarget)));
+          bar.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
+          main.append(bar);
+        }
         return;
       }
       if (state.activeTab !== 'selected') {

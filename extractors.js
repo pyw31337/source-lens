@@ -55,7 +55,8 @@
     const videoKeys = [
       'video_url', 'videoUrl', 'playable_url', 'playable_url_quality_hd',
       'browser_native_hd_url', 'browser_native_sd_url', 'contentUrl',
-      'playAddr', 'downloadAddr', 'playback_url', 'play_url'
+      'playAddr', 'downloadAddr', 'playback_url', 'play_url', 'playUrl',
+      'streamUrl', 'sourceUrl', 'hd_src', 'sd_src', 'hd_src_no_ratelimit'
     ];
     videoKeys.forEach(key => {
       const url = takeUrl(node[key]);
@@ -209,7 +210,14 @@
     try { scriptBlobs(); } catch { /* ignore */ }
     try { metas(); } catch { /* ignore */ }
     try { koreanPortals(); } catch { /* ignore */ }
+    try { extraPlayers(); } catch { /* ignore */ }
     emit();
+  }
+
+  function extraPlayers() {
+    [window.playerConfig, window.config, window.__PRELOADED_STATE__, window.__NEXT_DATA__].forEach(obj => {
+      if (obj && typeof obj === 'object') walk(obj, 0);
+    });
   }
 
   run();
