@@ -15,6 +15,34 @@
   const esc = SL.esc;
   const bytes = SL.bytes;
   const fileName = SL.fileName;
+  const labelOf = item => item?.name || fileName(item?.url || '') || 'media';
+
+  function svgSource(item) {
+    if (item?.code) return item.code;
+    if (/^data:image\/svg/i.test(item?.url || '')) {
+      try { return decodeURIComponent((item.url.split(',')[1] || '').replace(/\+/g, ' ')); }
+      catch { return item.url; }
+    }
+    return '';
+  }
+
+  function copySvg(item, button) {
+    const run = text => {
+      if (!text) return;
+      copy(text, button);
+    };
+    const local = svgSource(item);
+    if (local) return run(local);
+    if (/\.svg(?:$|[?#])/i.test(item.url || '')) {
+      fetchBytes(item.url).then(blob => blob.text()).then(text => {
+        item.code = sanitizeSvg(text);
+        run(item.code);
+      }).catch(() => copy(item.url, button));
+      return;
+    }
+    copy(item.url, button);
+  }
+
 
   function siteKind() {
     const host = location.hostname.replace(/^www\./, '').toLowerCase();
@@ -41,6 +69,7 @@
       height: extra.height || extra.element?.naturalHeight || extra.element?.videoHeight || 0,
       size: extra.size || 0,
       mime: extra.mime || '',
+      name: extra.name || '',
       relation: extra.relation || 'target'
     };
   }
@@ -184,27 +213,67 @@
     return out.slice(0, 2);
   }
 
+  function svgName(svg) {
+    const titled = svg.querySelector?.('title')?.textContent?.trim();
+    if (titled) return titled;
+    const lucide = [...(svg.classList || [])].find(c => c.startsWith('lucide-') && c !== 'lucide');
+    if (lucide) return lucide.replace(/^lucide-/, '');
+    const labeled = svg.getAttribute('aria-label')
+      || svg.closest?.('[aria-label], [data-name], [title]')?.getAttribute('aria-label')
+      || svg.closest?.('[data-name]')?.getAttribute('data-name')
+      || svg.closest?.('[title]')?.getAttribute('title');
+    if (labeled) return labeled.trim().slice(0, 60);
+    const sibling = svg.parentElement?.querySelector?.('span, p, figcaption, [class*="name"]')?.textContent?.trim();
+    return (sibling || '').slice(0, 60) || 'icon';
+  }
+
+  function svgCandidate(svg, source, confidence) {
+    if (!svg || svg.closest?.('#sl-host')) return null;
+    const r = svg.getBoundingClientRect();
+    if (r.width < 8 || r.height < 8) return null;
+    const social = ['instagram', 'facebook', 'youtube'].includes(siteKind());
+    if (social && svg.closest('nav, header, footer, [role="navigation"], [role="banner"]')) return null;
+    if (social && Math.max(r.width, r.height) < 36) return null;
+    const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
+    const name = svgName(svg);
+    return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, source, 'svg', {
+      element: svg, code, confidence, relation: 'page', name, width: Math.round(r.width), height: Math.round(r.height)
+    });
+  }
+
   function collectInlineSvg(target) {
     const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg');
-    const root = clicked ? (clicked.closest('article, [role="dialog"], main') || document.body) : (target?.closest?.('article') || target);
-    const nodes = new Set();
-    if (clicked) nodes.add(clicked);
-    root?.querySelectorAll?.('svg')?.forEach(svg => {
-      const r = svg.getBoundingClientRect();
-      if (svg.closest('nav, footer, [role="navigation"]')) return;
-      if (clicked || (r.width >= 24 && r.height >= 24)) nodes.add(svg);
-    });
-    const out = [...nodes].map(svg => {
-      const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
-      return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, 'inline SVG', 'svg', {
-        element: svg, code, confidence: svg === clicked ? '최상' : '중간'
-      });
-    });
-    root?.querySelectorAll?.('img')?.forEach(img => {
-      const url = abs(img.currentSrc || img.src || img.getAttribute('src'));
-      if (url && /\.svg(?:$|[?#])/i.test(url)) out.push(candidate(url, 'img SVG', 'svg', { element: img, confidence: '높음' }));
-    });
+    const out = [];
+    if (clicked) {
+      const item = svgCandidate(clicked, 'inline SVG', '최상');
+      if (item) out.push(item);
+    }
     return out.filter(Boolean);
+  }
+
+  function collectPageSvgs() {
+    const social = ['instagram', 'facebook', 'youtube'].includes(siteKind());
+    const min = social ? 36 : 12;
+    const out = [];
+    const seen = new Set();
+    $$('svg').forEach(svg => {
+      const r = svg.getBoundingClientRect();
+      if (Math.min(r.width, r.height) < min) return;
+      const item = svgCandidate(svg, '페이지 SVG', svg === document.activeElement ? '최상' : '중간');
+      if (!item || seen.has(item.url)) return;
+      seen.add(item.url);
+      out.push(item);
+    });
+    $$('img, object, embed, image').forEach(node => {
+      const url = abs(node.currentSrc || node.src || node.getAttribute?.('src') || node.getAttribute?.('data') || '');
+      if (!url || !/\.svg(?:$|[?#])/i.test(url) || node.closest?.('#sl-host')) return;
+      if (seen.has(url)) return;
+      seen.add(url);
+      out.push(candidate(url, '페이지 SVG', 'svg', {
+        element: node, confidence: '높음', relation: 'page', name: fileName(url)
+      }));
+    });
+    return out.slice(0, 500);
   }
 
   function collectYouTube(target) {
@@ -319,21 +388,7 @@
         element: video, confidence: '중간', width: video.videoWidth || 0, height: video.videoHeight || 0, relation: 'page'
       });
     }).filter(Boolean);
-    const svgs = $$('svg').map(svg => {
-      if (svg.closest?.('#sl-host, nav, footer, [role="navigation"]')) return null;
-      const r = svg.getBoundingClientRect();
-      if (r.width < 64 || r.height < 64) return null;
-      const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
-      return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, '페이지 SVG', 'svg', {
-        element: svg, code, confidence: '중간', relation: 'page'
-      });
-    }).filter(Boolean);
-    $$('img').forEach(img => {
-      const url = abs(img.currentSrc || img.src);
-      if (url && /\.svg(?:$|[?#])/i.test(url) && !img.closest?.('#sl-host')) {
-        svgs.push(candidate(url, '페이지 SVG', 'svg', { element: img, confidence: '중간', relation: 'page' }));
-      }
-    });
+    const svgs = collectPageSvgs();
     return [...images, ...videos, ...svgs];
   }
 
@@ -578,7 +633,7 @@
     if (preview) card.append(preview);
     const title = document.createElement('div');
     title.className = 'sl-file-meta';
-    title.textContent = `${fileName(item.url)} · ${item.state || ''}`;
+    title.textContent = `${labelOf(item)} · ${item.state || ''}`;
     const page = document.createElement('div');
     page.className = 'sl-lightbox-page';
     page.textContent = `${index + 1} / ${items.length}`;
@@ -599,6 +654,7 @@
     addBtn('URL 복사', 'primary', ev => copy(item.temporary ? (state.postUrl || item.url) : item.url, ev.currentTarget));
     addBtn('저장', 'primary', () => saveItem(item));
     addBtn('새 탭', 'normal', () => window.open(item.temporary ? (state.postUrl || item.url) : item.url, '_blank', 'noopener'));
+    if (item.type === 'svg') addBtn('코드 복사', 'primary', ev => copySvg(item, ev.currentTarget));
     if (item.type === 'image' || item.type === 'svg') {
       [['JPG', 'jpg', 'image/jpeg'], ['PNG', 'png', 'image/png'], ['WebP', 'webp', 'image/webp']].forEach(([label, ext, mime]) => {
         addBtn(`${label} 저장`, 'normal', ev => convertImage(item, { label, ext, mime }, ev.currentTarget));
@@ -735,7 +791,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.4</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.5</small></h2>
+
 
 
 
@@ -758,6 +815,7 @@
     };
     const draw = () => {
       main.textContent = '';
+      const selected = state.picked || state.candidates[0];
       panel.querySelectorAll('.sl-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.activeTab));
       updateCounts();
       const list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
@@ -771,13 +829,14 @@
         if (preview) main.append(preview);
         const card = document.createElement('article');
         card.className = 'sl-primary';
-        card.innerHTML = `<div class="sl-kicker">대표 후보</div><strong>${esc(fileName(item.url))}</strong>
+        card.innerHTML = `<div class="sl-kicker">대표 후보</div><strong>${esc(labelOf(item))}</strong>
           <div class="sl-file-meta sl-meta">${esc(item.state)} · ${esc(item.mime || item.type)}</div>
           <div class="sl-primary-actions">
             <button class="sl-btn sl-url" style="background:#fff;color:#1c1c1c;border:1px solid #d1d5db">URL 보기</button>
             <button class="sl-btn sl-copy" style="background:#229968;color:#fff;border:1px solid #187d54">URL 복사</button>
             <button class="sl-btn sl-new" style="background:#fff;color:#1c1c1c;border:1px solid #d1d5db">새 탭</button>
             <button class="sl-btn sl-save" style="background:#229968;color:#fff;border:1px solid #187d54">저장</button>
+            ${item.type === 'svg' ? '<button class="sl-btn sl-code" style="background:#fff;color:#1c1c1c;border:1px solid #d1d5db">코드 복사</button><button class="sl-btn sl-codeview" style="background:#fff;color:#1c1c1c;border:1px solid #d1d5db">코드 보기</button>' : ''}
           </div>`;
         $('.sl-url', card).onclick = ev => {
           const existing = card.querySelector('.sl-url-value');
@@ -795,6 +854,22 @@
         $('.sl-copy', card).onclick = ev => copy(item.temporary ? (state.postUrl || item.url) : item.url, ev.currentTarget);
         $('.sl-new', card).onclick = () => window.open(item.temporary ? (state.postUrl || item.url) : item.url, '_blank', 'noopener');
         $('.sl-save', card).onclick = () => saveItem(item);
+        $('.sl-code', card)?.addEventListener('click', ev => copySvg(item, ev.currentTarget));
+        $('.sl-codeview', card)?.addEventListener('click', ev => {
+          const existing = card.querySelector('.sl-svg-code');
+          if (existing) { existing.remove(); ev.currentTarget.textContent = '코드 보기'; return; }
+          const pre = document.createElement('pre');
+          pre.className = 'sl-url-value sl-svg-code';
+          pre.textContent = svgSource(item) || '코드를 불러오는 중…';
+          card.append(pre);
+          ev.currentTarget.textContent = '코드 숨기기';
+          if (!svgSource(item) && /\.svg(?:$|[?#])/i.test(item.url || '')) {
+            fetchBytes(item.url).then(blob => blob.text()).then(text => {
+              item.code = sanitizeSvg(text);
+              pre.textContent = item.code;
+            }).catch(() => { pre.textContent = item.url; });
+          }
+        });
         hydrateMeta(item, card);
         main.append(card);
       } else {
@@ -805,7 +880,7 @@
           tile.className = 'sl-tile';
           const preview = mediaNode(item, 'sl-tile-preview');
           if (preview) tile.append(preview);
-          tile.insertAdjacentHTML('beforeend', `<strong>${esc(fileName(item.url))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
+          tile.insertAdjacentHTML('beforeend', `<strong>${esc(labelOf(item))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
           hydrateMeta(item, tile);
           tile.onclick = () => openLightbox(item, list, index);
           grid.append(tile);
@@ -872,6 +947,7 @@
     }
     state.picked = list[0] || null;
     state.candidates = dedupe([...list, ...collectPageMedia()]);
+    state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
       try {
         window.top.postMessage({
@@ -880,7 +956,8 @@
           data: {
             candidates: state.candidates.map(({ element, ...item }) => item),
             picked: state.picked ? (({ element, ...item }) => item)(state.picked) : null,
-            postUrl: state.postUrl
+            postUrl: state.postUrl,
+            activeTab: state.activeTab
           }
         }, location.origin);
       } catch {
@@ -888,7 +965,6 @@
       }
       return;
     }
-    state.activeTab = 'selected';
     render();
   }
 
@@ -915,6 +991,7 @@
     state.candidates = ev.data.data?.candidates || [];
     state.picked = ev.data.data?.picked || state.candidates[0] || null;
     state.postUrl = ev.data.data?.postUrl || '';
+    state.activeTab = ev.data.data?.activeTab || 'selected';
     state.activeTab = 'selected';
     render();
   });
