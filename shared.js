@@ -4,9 +4,10 @@
   SL.MEDIA_EXT = /\.(?:mp4|m4v|mov|webm|mkv|ogv|avi|3gp|m3u8|mpd|ts|m4s)(?:$|[?#])/i;
   SL.IMAGE_EXT = /\.(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic)(?:$|[?#])/i;
   SL.PHOTO_EXT = /\.(?:jpe?g|png|webp|avif|bmp|jfif|heic)(?:$|[?#])/i;
-  SL.SIGNED = /(?:X-Amz-Signature|X-Amz-Expires|Expires=|Signature=|oh=|oe=|expire=|exp=|Policy=)/i;
+  SL.SIGNED = /(?:X-Amz-Signature|X-Amz-Expires|X-Amz-Credential|Key-Pair-Id|Policy=|Signature=|Expires=|oh=|oe=|_nc_ohc|_nc_ht|_nc_sid|expire=|exp=)/i;
 
   SL.abs = function abs(value, base) {
+
     if (!value || typeof value !== 'string') return '';
     const trimmed = value.trim();
     if (!trimmed || trimmed === '#') return '';
@@ -63,48 +64,113 @@
     return current;
   };
 
-  SL.upgradeMediaUrl = function upgradeMediaUrl(url) {
-    if (!url || typeof url !== 'string') return url;
-    if (SL.SIGNED.test(url) || /cdninstagram\.com|fbcdn\.net|scontent/i.test(url)) return url;
-    try {
-      const u = new URL(url, typeof location !== 'undefined' ? location.href : 'https://example.com/');
-      const host = u.hostname;
-      if (/images\.unsplash\.com|unsplash\.com/i.test(host)) {
+  SL.URL_LOCK = [
+    /cdninstagram\.com/i,
+    /(?:^|\.)fbcdn\.net/i,
+    /scontent/i,
+    /tiktokcdn/i,
+    /muscdn\.com/i,
+    /bytevod/i,
+    /googlevideo\.com/i,
+    /shop-phinf\.pstatic\.net/i,
+    /shopping-phinf/i,
+    /dthumb-phinf\.pstatic\.net/i,
+    /imgnews\.pstatic\.net/i,
+    /ssl\.pstatic\.net/i,
+    /dcimg\d*\.dcinside/i,
+    /viewimage\.php/i,
+    /gdimg\.gmarket\.co\.kr/i,
+    /pic\.auction\.co\.kr/i,
+    /ssgcdn\.com/i,
+    /cdn\.011st\.com/i,
+    /image\.tmon\.co\.kr/i,
+    /lotteimall|lotteon\.com/i,
+    /kakaocdn\.net/i,
+    /daumcdn\.net/i,
+    /i\.vimeocdn\.com/i,
+    /i\.ytimg\.com/i
+  ];
+
+  SL.URL_REWRITE = [
+    {
+      name: 'unsplash',
+      test: /images\.unsplash\.com/i,
+      apply(u) {
         u.searchParams.set('w', '2400');
         u.searchParams.set('q', '90');
         return u.href;
       }
-      if (/images\.pexels\.com|pexels\.com/i.test(host)) {
+    },
+    {
+      name: 'pexels',
+      test: /images\.pexels\.com/i,
+      apply(u) {
         u.searchParams.set('auto', 'compress');
         u.searchParams.set('cs', 'tinysrgb');
         u.searchParams.set('w', '1920');
         return u.href;
       }
-      if (/pixabay\.com/i.test(host)) {
-        return url.replace(/_(\d{2,4})(\.(?:jpe?g|png|webp))/i, (m, n, ext) => Number(n) < 1280 ? `_1280${ext}` : m);
+    },
+    {
+      name: 'pixabay',
+      test: /pixabay\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/_(\d{2,4})(\.(?:jpe?g|png|webp))/i, (m, n, ext) => Number(n) < 1280 ? `_1280${ext}` : m);
       }
-      if (/dribbble\.com/i.test(host)) {
-        return url.replace(/\/(?:small|teaser|thumbnail)\//i, '/original/').replace(/_teaser/i, '');
+    },
+    {
+      name: 'dribbble',
+      test: /cdn\.dribbble\.com|dribbble\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/\/(?:small|teaser|thumbnail)\//i, '/original/').replace(/_teaser/i, '');
       }
-      if (/behance\.net|behance\.net|mir-s3-cdn-cf\.behance/i.test(host)) {
-        return url.replace(/\/fs\/\d+\//, '/fs/source/').replace(/\/[0-9]+x[0-9]+\//, '/');
+    },
+    {
+      name: 'behance',
+      test: /behance\.net|mir-s3-cdn-cf\.behance/i,
+      apply(_u, raw) {
+        return raw.replace(/\/fs\/\d+\//, '/fs/source/').replace(/\/[0-9]+x[0-9]+\//, '/');
       }
-      if (/shop-phinf\.pstatic\.net|shopping-phinf/i.test(host)) return url;
-      if (/(?:blogfiles|postfiles|cafefiles)\.pstatic\.net/i.test(host)) {
+    },
+    {
+      name: 'naver-blog',
+      test: /(?:blogfiles|postfiles|cafefiles)\.pstatic\.net/i,
+      apply(u) {
         u.searchParams.set('type', 'w966');
         return u.href;
       }
-      if (/pstatic\.net|naver\.net/i.test(host)) return url;
-      if (/coupangcdn|thumbnail.*coupang/i.test(host + url)) {
-        return url.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
+    },
+    {
+      name: 'coupang',
+      test: /coupangcdn|thumbnail.*coupang/i,
+      apply(_u, raw) {
+        return raw.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
       }
-      if (/danawa\.com/i.test(host)) {
-        return url.replace(/\/resize\/\d+x\d+\//i, '/').replace(/_[sml](?=\.)/i, '');
+    },
+    {
+      name: 'danawa',
+      test: /img\.danawa\.com|danawa\.com/i,
+      apply(_u, raw) {
+        return raw.replace(/\/resize\/\d+x\d+\//i, '/').replace(/_[sml](?=\.)/i, '');
+      }
+    }
+  ];
+
+  SL.upgradeMediaUrl = function upgradeMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    const unwrapped = SL.unwrapMediaUrl(url);
+    if (!unwrapped) return url;
+    if (SL.SIGNED.test(unwrapped)) return unwrapped;
+    if (SL.URL_LOCK.some(re => re.test(unwrapped))) return unwrapped;
+    try {
+      const parsed = new URL(unwrapped, typeof location !== 'undefined' ? location.href : 'https://example.com/');
+      for (const rule of SL.URL_REWRITE) {
+        if (rule.test.test(unwrapped) || rule.test.test(parsed.hostname)) {
+          return rule.apply(parsed, unwrapped) || unwrapped;
+        }
       }
     } catch { /* keep */ }
-    return url
-      .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
-      .replace(/_[a-z]?thum{1,2}(?=\.)/i, '');
+    return unwrapped;
   };
 
   SL.fileName = function fileName(url) {

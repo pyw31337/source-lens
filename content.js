@@ -107,9 +107,9 @@
     if (!value) return null;
     if (typeof SL.unwrapMediaUrl === 'function') value = abs(SL.unwrapMediaUrl(value)) || value;
     if (SL.isUiJunk(value) && hint !== 'svg') return null;
-    if (hint !== 'svg' && hint !== 'video' && !SL.SIGNED.test(value) && !/cdninstagram|fbcdn\.net|scontent/i.test(value) && typeof SL.upgradeMediaUrl === 'function') {
+    if (hint !== 'svg' && hint !== 'video' && typeof SL.upgradeMediaUrl === 'function') {
       const upgraded = SL.upgradeMediaUrl(value);
-      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded))) value = upgraded;
+      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded) || /pstatic\.net|unsplash|pexels|coupangcdn|danawa/i.test(upgraded))) value = upgraded;
     }
     const info = SL.classifyUrl(value, hint);
     if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
@@ -1497,7 +1497,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.6</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.9.0</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
