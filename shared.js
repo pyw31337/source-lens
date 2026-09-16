@@ -39,6 +39,48 @@
     return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
   };
 
+  SL.upgradeMediaUrl = function upgradeMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    try {
+      const u = new URL(url, typeof location !== 'undefined' ? location.href : 'https://example.com/');
+      const host = u.hostname;
+      if (/images\.unsplash\.com|unsplash\.com/i.test(host)) {
+        u.searchParams.set('w', '2400');
+        u.searchParams.set('q', '90');
+        return u.href;
+      }
+      if (/images\.pexels\.com|pexels\.com/i.test(host)) {
+        u.searchParams.set('auto', 'compress');
+        u.searchParams.set('cs', 'tinysrgb');
+        u.searchParams.set('w', '1920');
+        return u.href;
+      }
+      if (/pixabay\.com/i.test(host)) {
+        return url.replace(/_(\d{2,4})(\.(?:jpe?g|png|webp))/i, (m, n, ext) => Number(n) < 1280 ? `_1280${ext}` : m);
+      }
+      if (/dribbble\.com/i.test(host)) {
+        return url.replace(/\/(?:small|teaser|thumbnail)\//i, '/original/').replace(/_teaser/i, '');
+      }
+      if (/behance\.net|behance\.net|mir-s3-cdn-cf\.behance/i.test(host)) {
+        return url.replace(/\/fs\/\d+\//, '/fs/source/').replace(/\/[0-9]+x[0-9]+\//, '/');
+      }
+      if (/pstatic\.net|naver\.net/i.test(host)) {
+        u.searchParams.set('type', 'w2000');
+        return u.href.replace(/[?&]type=w\d+/ig, m => m.startsWith('?') ? '?type=w2000' : '&type=w2000');
+      }
+      if (/coupangcdn|thumbnail.*coupang/i.test(host + url)) {
+        return url.replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/');
+      }
+      if (/danawa\.com/i.test(host)) {
+        return url.replace(/\/resize\/\d+x\d+\//i, '/').replace(/_[sml](?=\.)/i, '');
+      }
+    } catch { /* keep */ }
+    return url
+      .replace(/([?&])type=w\d+/ig, '$1type=w2000')
+      .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
+      .replace(/_[a-z]?thum{1,2}(?=\.)/i, '');
+  };
+
   SL.fileName = function fileName(url) {
     try {
       if (/^blob:/i.test(url || '')) return 'session-video';
@@ -58,6 +100,7 @@
     if (!url) return true;
     if (/^data:image\/svg/i.test(url)) return false;
     if (/rsrc\.php|static\.(?:xx\.)?fbcdn|static\.cdninstagram|instagram\.com\/static|facebook\.com\/rsrc/i.test(url)) return true;
+    if (/\/(?:emoticon|emoji|nickcon|wcmt_emot)\//i.test(url)) return true;
     if (/\.(?:gif|ico)(?:$|[?#])/i.test(url)) return true;
     if (/\.svg(?:$|[?#])/i.test(url) && /(?:cdninstagram|fbcdn|instagram\.com|facebook\.com)/i.test(url)) return true;
     return false;
@@ -70,7 +113,7 @@
     if (SL.PHOTO_EXT.test(url)) return true;
     if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return true;
     if (/[?&]stp=/i.test(url) && !SL.MEDIA_EXT.test(url)) return true;
-    if (/i\.ytimg\.com|ggpht\.com/i.test(url)) return true;
+    if (/i\.ytimg\.com|ggpht\.com|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|mir-s3-cdn-cf\.behance/i.test(url)) return true;
     return false;
   };
 

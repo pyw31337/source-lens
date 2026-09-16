@@ -44,8 +44,14 @@
   }
 
 
+  function siteProfile() {
+    return (typeof sourceLensSite === 'function' ? sourceLensSite(location.hostname) : { kind: siteKind(), svgMin: 12, skipChrome: true });
+  }
+
   function siteKind() {
     const host = location.hostname.replace(/^www\./, '').toLowerCase();
+    const mapped = (typeof sourceLensSite === 'function' && sourceLensSite(host).kind) || '';
+    if (mapped && mapped !== 'generic') return mapped;
     if (host.endsWith('youtube.com') || host === 'youtu.be') return 'youtube';
     if (host.endsWith('instagram.com')) return 'instagram';
     if (host.endsWith('facebook.com') || host === 'fb.watch') return 'facebook';
@@ -59,16 +65,11 @@
   }
 
   function isCommerce() {
-    return siteKind() === 'commerce' || /item\.|product|goods|shop|store|mall/i.test(location.hostname + location.pathname);
+    return ['commerce', 'stock'].includes(siteKind()) || /item\.|product|goods|shop|store|mall/i.test(location.hostname + location.pathname);
   }
 
   function upgradeCommerceUrl(url) {
-    if (!url) return url;
-    return url
-      .replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/thumbnails/remote/1000x1000ex/')
-      .replace(/([?&])type=w\d+/ig, '$1type=w2000')
-      .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
-      .replace(/_[a-z]?thum{1,2}(?=\.)/i, '');
+    return SL.upgradeMediaUrl(url);
   }
 
   function isTallItem(item) {
@@ -137,8 +138,10 @@
   }
 
   function isChromeImage(node, url) {
+    if (siteProfile().skipChrome === false) return false;
     const src = url || node?.currentSrc || node?.src || '';
     if (/logo|favicon|image__logo|\/ci\/|brand[_-]?mark|sprite\.(?:png|gif|svg)/i.test(src)) return true;
+    if (/\/(?:emoticon|emoji|nickcon)\//i.test(src)) return true;
     if (node?.closest?.('header, nav, [role="banner"], .header, #header, .gds-header, footer')) return true;
     return false;
   }
@@ -271,7 +274,8 @@
     out.push(candidate(node.currentSrc || node.src, 'img.currentSrc', 'image', { element: media, confidence: '최상' }));
     (node.srcset || node.getAttribute('srcset') || '').split(',').map(p => p.trim().split(/\s+/)[0]).filter(Boolean)
       .forEach(url => out.push(candidate(url, 'srcset', 'image', { element: media, confidence: '높음' })));
-    ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image'].forEach(attr => {
+    ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
+      'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
       out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
     });
   }
@@ -400,6 +404,7 @@
   }
 
   function isUiSvg(svg, url, name) {
+    if (siteKind() === 'icons') return false;
     if (svg?.closest?.('header, nav, footer, [role="banner"], [role="navigation"], .header, #header')) return true;
     const blob = `${url || ''} ${name || ''}`;
     if (/header|gnb_|mypage|cart|recent|favicon/i.test(blob)) return true;
@@ -439,8 +444,8 @@
   }
 
   function collectPageSvgs() {
-    const social = ['instagram', 'facebook', 'youtube'].includes(siteKind());
-    const min = social ? 36 : 12;
+    const social = ['instagram', 'facebook', 'youtube', 'social', 'video'].includes(siteKind());
+    const min = siteProfile().svgMin || (social ? 36 : 12);
     const out = [];
     const seen = new Set();
     $$('svg').forEach(svg => {
@@ -587,7 +592,42 @@
       });
     }).filter(Boolean);
     const svgs = collectPageSvgs();
-    return [...images, ...videos, ...svgs, ...(isCommerce() ? collectCommerce() : [])];
+    return [...images, ...videos, ...svgs, ...collectCatalogMedia()];
+  }
+
+  function collectCatalogMedia() {
+    const profile = siteProfile();
+    if (!profile.extra) return [];
+    const out = [];
+    const push = (url, source, extra = {}) => {
+      const value = abs(url);
+      if (!value || SL.isUiJunk(value) || !SL.isImageUrl(value)) return;
+      out.push(candidate(value, source, 'image', extra));
+      if (profile.upgrade) {
+        const upgraded = SL.upgradeMediaUrl(value);
+        if (upgraded && upgraded !== value) out.push(candidate(upgraded, `${source} 원본`, 'image', { ...extra, confidence: '높음' }));
+      }
+    };
+    document.querySelector('meta[property="og:image"]')?.content && push(document.querySelector('meta[property="og:image"]').content, 'og:image', { confidence: '높음' });
+    document.querySelector('meta[name="twitter:image"]')?.content && push(document.querySelector('meta[name="twitter:image"]').content, 'twitter:image', { confidence: '높음' });
+    $$('img, source').forEach(node => {
+      ['src', 'currentSrc', 'data-src', 'data-original', 'data-origin', 'data-zoom', 'data-zoom-image', 'data-lazy-src', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'org_src'].forEach(attr => {
+        const v = node[attr] || node.getAttribute?.(attr);
+        if (v) push(v, attr, { element: node.tagName === 'IMG' ? node : null, confidence: '중간' });
+      });
+      const srcset = node.srcset || node.getAttribute?.('srcset') || '';
+      srcset.split(',').forEach(part => {
+        const u = part.trim().split(/\s+/)[0];
+        if (u) push(u, 'srcset', { confidence: '중간' });
+      });
+    });
+    $$('[style*="background"]').slice(0, 80).forEach(node => {
+      const bg = getComputedStyle(node).backgroundImage || '';
+      const re = /url\(["']?(https?:[^"')]+)["']?\)/g;
+      let match;
+      while ((match = re.exec(bg))) push(match[1], '배경 이미지', { confidence: '중간' });
+    });
+    return out.slice(0, 120);
   }
 
   function collectCommerce() {
@@ -1127,7 +1167,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.5.0</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.5.1</small></h2>
+
 
 
 
@@ -1274,7 +1315,7 @@
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);
     const extras = [];
-    if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum'].includes(siteKind())) {
+    if (clickedVideo || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver', 'kakao', 'daum', 'video'].includes(siteKind())) {
       extras.push(...collectRecentVideos(collected.media));
     }
     extras.push(...(state.platformMedia || []));

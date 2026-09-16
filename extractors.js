@@ -2,7 +2,7 @@
   if (window.__sourceLensExtractors) return;
   window.__sourceLensExtractors = true;
 
-  const IMAGE = /\.(?:jpe?g|png|webp)(?:$|[?#])/i;
+  const IMAGE = /\.(?:jpe?g|png|webp)(?:$|[?#])|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|behance\.net|pstatic\.net|dcimg|namu\.la|kakaocdn|daumcdn/i;
   const VIDEO = /\.(?:mp4|m4v|webm|mov|m3u8)(?:$|[?#])|videoplayback|googlevideo|vimeocdn|tiktokcdn|muscdn|fbcdn\.net\/v\/t[0-9].*mp4|cdninstagram.*mp4|playable_url|bytevod|naver\.net\/.*(?:mp4|hls)|kakaocdn|daumcdn.*mp4/i;
   const SKIP = /logo|sprite|favicon|1x1|pixel|tracking|adservice|doubleclick/i;
 
