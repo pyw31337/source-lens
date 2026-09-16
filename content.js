@@ -4,9 +4,11 @@
 
   const SL = globalThis.SourceLens;
   const state = {
-    panel: null, selected: null, contextTarget: null, selectedMedia: null,
-    candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [], profile: null
+    panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
+    candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
+    profile: null, observer: null, scanTimer: 0, redraw: null
   };
+
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
   const abs = value => SL.abs(value, location.href);
@@ -279,9 +281,98 @@
   }
 
   function closePanel() {
+    state.observer?.disconnect();
+    state.observer = null;
+    if (state.scanTimer) clearInterval(state.scanTimer);
+    state.scanTimer = 0;
+    if (state.onMediaLoad) document.removeEventListener('load', state.onMediaLoad, true);
+    state.onMediaLoad = null;
+    state.redraw = null;
     state.shadow?.querySelectorAll?.('#sl-root, .sl-lightbox, .sl-slice-editor')?.forEach(n => n.remove());
     state.panel = null;
     state.selected?.classList?.remove('sl-select');
+  }
+
+  function pageImageItem(img) {
+    if (!img || img.closest?.('#sl-host')) return null;
+    const url = abs(img.currentSrc || img.src);
+    if (!url || SL.isUiJunk(url) || !SL.isImageUrl(url)) return null;
+    const r = img.getBoundingClientRect();
+    const w = img.naturalWidth || img.width || r.width || 0;
+    const h = img.naturalHeight || img.height || r.height || 0;
+    if (Math.min(w, h) < 96) return null;
+    if (/s150x150|s320x320|_s\.(?:jpe?g|png|webp)/i.test(url) && Math.min(w, h) < 400) return null;
+    return candidate(url, '페이지 이미지', 'image', {
+      element: img, confidence: '중간', width: img.naturalWidth || 0, height: img.naturalHeight || 0, relation: 'page'
+    });
+  }
+
+  function collectPageMedia() {
+    const images = $$('img').map(pageImageItem).filter(Boolean);
+    const videos = $$('video').map(video => {
+      if (video.closest?.('#sl-host')) return null;
+      const r = video.getBoundingClientRect();
+      if (Math.min(r.width || 0, r.height || 0, video.videoWidth || r.width || 0) < 96) return null;
+      const url = abs(video.currentSrc || video.src);
+      if (url && SL.isImageUrl(url)) return null;
+      return candidate(url || 'blob:session-video', '페이지 영상', 'video', {
+        element: video, confidence: '중간', width: video.videoWidth || 0, height: video.videoHeight || 0, relation: 'page'
+      });
+    }).filter(Boolean);
+    const svgs = $$('svg').map(svg => {
+      if (svg.closest?.('#sl-host, nav, footer, [role="navigation"]')) return null;
+      const r = svg.getBoundingClientRect();
+      if (r.width < 64 || r.height < 64) return null;
+      const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
+      return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, '페이지 SVG', 'svg', {
+        element: svg, code, confidence: '중간', relation: 'page'
+      });
+    }).filter(Boolean);
+    $$('img').forEach(img => {
+      const url = abs(img.currentSrc || img.src);
+      if (url && /\.svg(?:$|[?#])/i.test(url) && !img.closest?.('#sl-host')) {
+        svgs.push(candidate(url, '페이지 SVG', 'svg', { element: img, confidence: '중간', relation: 'page' }));
+      }
+    });
+    return [...images, ...videos, ...svgs];
+  }
+
+  function mergePageMedia() {
+    const incoming = collectPageMedia();
+    const have = new Set(state.candidates.map(item => item.url));
+    let added = 0;
+    incoming.forEach(item => {
+      if (!item?.url || have.has(item.url)) return;
+      have.add(item.url);
+      state.candidates.push(item);
+      added += 1;
+    });
+    return added;
+  }
+
+  function startPageWatch() {
+    state.observer?.disconnect();
+    if (state.scanTimer) clearInterval(state.scanTimer);
+    if (state.onMediaLoad) document.removeEventListener('load', state.onMediaLoad, true);
+    state.onMediaLoad = ev => {
+      const node = ev.target;
+      if (!state.panel || !node?.tagName) return;
+      if (node.tagName !== 'IMG' && node.tagName !== 'VIDEO' && node.tagName !== 'SVG') return;
+      if (mergePageMedia()) state.redraw?.();
+    };
+    document.addEventListener('load', state.onMediaLoad, true);
+    state.observer = new MutationObserver(() => {
+      if (!state.panel || state._scanSoon) return;
+      state._scanSoon = setTimeout(() => {
+        state._scanSoon = 0;
+        if (state.panel && mergePageMedia()) state.redraw?.();
+      }, 280);
+    });
+    state.observer.observe(document.documentElement, { childList: true, subtree: true });
+    state.scanTimer = setInterval(() => {
+      if (!state.panel) return;
+      if (mergePageMedia()) state.redraw?.();
+    }, 900);
   }
 
   function mediaNode(item, className) {
@@ -605,12 +696,13 @@
     shadow.append(root);
     const brand = (typeof sourceLensProfileFor === 'function' ? sourceLensProfileFor(location.hostname) : null)?.brand
       || { name: siteKind(), color: '#229968' };
-    const selected = state.candidates[0];
+    const selected = state.picked || state.candidates[0];
     panel.innerHTML = `
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.2</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.3</small></h2>
+
 
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
@@ -624,12 +716,15 @@
       <main class="sl-main"></main>`;
     $('.sl-close', panel).onclick = closePanel;
     const main = $('.sl-main', panel);
-    const draw = () => {
-      main.textContent = '';
-      panel.querySelectorAll('.sl-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.activeTab));
+    const updateCounts = () => {
       panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
       panel.querySelector('[data-tab="video"] b').textContent = state.candidates.filter(i => i.type === 'video').length;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
+    };
+    const draw = () => {
+      main.textContent = '';
+      panel.querySelectorAll('.sl-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.activeTab));
+      updateCounts();
       const list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
       if (!list.length) {
         main.innerHTML = '<div class="sl-empty">표시할 미디어가 없습니다.</div>';
@@ -686,7 +781,12 @@
     panel.querySelectorAll('.sl-tabs button').forEach(btn => {
       btn.onclick = () => { state.activeTab = btn.dataset.tab; draw(); };
     });
+    state.redraw = () => {
+      if (state.activeTab === 'selected') { updateCounts(); return; }
+      draw();
+    };
     draw();
+    startPageWatch();
   }
 
   function collectArticle(target) {
@@ -735,7 +835,8 @@
     } else {
       list = list.filter(item => (item.type === 'image' && SL.isImageUrl(item.url)) || item.type === 'svg');
     }
-    state.candidates = list;
+    state.picked = list[0] || null;
+    state.candidates = dedupe([...list, ...collectPageMedia()]);
     if (window !== window.top) {
       try {
         window.top.postMessage({
@@ -743,6 +844,7 @@
           type: 'open',
           data: {
             candidates: state.candidates.map(({ element, ...item }) => item),
+            picked: state.picked ? (({ element, ...item }) => item)(state.picked) : null,
             postUrl: state.postUrl
           }
         }, location.origin);
@@ -776,6 +878,7 @@
   window.addEventListener('message', ev => {
     if (window !== window.top || !ev.data?.sourceLens || ev.data.type !== 'open') return;
     state.candidates = ev.data.data?.candidates || [];
+    state.picked = ev.data.data?.picked || state.candidates[0] || null;
     state.postUrl = ev.data.data?.postUrl || '';
     state.activeTab = 'selected';
     render();
