@@ -72,6 +72,15 @@
     return h >= 1200 && w > 0 && h > w * 2.2;
   }
 
+  function videoEmptyMessage() {
+    const k = siteKind();
+    if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
+    if (k === 'youtube') return '유튜브는 영상을 잘게 나눠 스트리밍해서, 하나의 mp4 주소가 없습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
+    if (k === 'instagram' || k === 'facebook') return '인스타/페이스북 영상은 blob(임시 주소)로 재생됩니다. 영상이 재생 중일 때 화면을 Alt+클릭해야 잡을 수 있고, 탭을 닫으면 사라집니다.';
+    if (k === 'vimeo') return '비메오도 스트리밍 조각으로 재생되는 경우가 많습니다. 재생 중일 때 플레이어를 Alt+클릭하세요.';
+    return '이 페이지에서 영상 파일을 찾지 못했습니다. 재생 중인 플레이어를 Alt+클릭해 보세요.';
+  }
+
   function candidate(url, source, hint, extra = {}) {
     const value = abs(url);
     if (!value) return null;
@@ -89,7 +98,9 @@
       size: extra.size || 0,
       mime: extra.mime || '',
       name: extra.name || '',
+      fp: extra.fp || '',
       relation: extra.relation || 'target'
+
     };
   }
 
@@ -344,17 +355,46 @@
     return (sibling || '').slice(0, 60) || 'icon';
   }
 
-  function svgCandidate(svg, source, confidence) {
+  function svgFingerprint(svg, code) {
+    const shapes = [...(svg?.querySelectorAll?.('path, circle, rect, polygon, polyline, line, ellipse') || [])]
+      .map(el => [
+        el.tagName.toLowerCase(),
+        (el.getAttribute('d') || '').replace(/\s+/g, ' ').slice(0, 160),
+        el.getAttribute('points') || '',
+        el.getAttribute('r') || '',
+        Math.round(Number(el.getAttribute('cx')) || 0),
+        Math.round(Number(el.getAttribute('cy')) || 0)
+      ].join(':'));
+    if (shapes.length) return shapes.join('|');
+    return String(code || '').replace(/id="[^"]*"/g, '').replace(/\s+/g, ' ').slice(0, 240);
+  }
+
+  function isUiSvg(svg, url, name) {
+    if (svg?.closest?.('header, nav, footer, [role="banner"], [role="navigation"], .header, #header')) return true;
+    const blob = `${url || ''} ${name || ''}`;
+    if (/header|gnb_|mypage|cart|recent|favicon/i.test(blob)) return true;
+    if (isCommerce() && /live/i.test(`${svg?.textContent || ''} ${name || ''}`)) return true;
+    const r = svg?.getBoundingClientRect?.();
+    if (isCommerce() && r && r.width <= 48 && r.height <= 48) {
+      const circles = svg.querySelectorAll?.('circle')?.length || 0;
+      if (circles >= 3) return true;
+    }
+    return false;
+  }
+
+  function svgCandidate(svg, source, confidence, extra = {}) {
     if (!svg || svg.closest?.('#sl-host')) return null;
     const r = svg.getBoundingClientRect();
     if (r.width < 8 || r.height < 8) return null;
     const social = ['instagram', 'facebook', 'youtube'].includes(siteKind());
-    if (social && svg.closest('nav, header, footer, [role="navigation"], [role="banner"]')) return null;
     if (social && Math.max(r.width, r.height) < 36) return null;
+    if (!extra.keepUi && isUiSvg(svg, extra.url, svgName(svg))) return null;
     const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
     const name = svgName(svg);
+    const fp = svgFingerprint(svg, code);
     return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, source, 'svg', {
-      element: svg, code, confidence, relation: 'page', name, width: Math.round(r.width), height: Math.round(r.height)
+      element: svg, code, confidence, relation: extra.relation || 'page', name,
+      width: Math.round(r.width), height: Math.round(r.height), fp
     });
   }
 
@@ -362,7 +402,7 @@
     const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg');
     const out = [];
     if (clicked) {
-      const item = svgCandidate(clicked, 'inline SVG', '최상');
+      const item = svgCandidate(clicked, 'inline SVG', '최상', { keepUi: true, relation: 'target' });
       if (item) out.push(item);
     }
     return out.filter(Boolean);
@@ -376,21 +416,26 @@
     $$('svg').forEach(svg => {
       const r = svg.getBoundingClientRect();
       if (Math.min(r.width, r.height) < min) return;
-      const item = svgCandidate(svg, '페이지 SVG', svg === document.activeElement ? '최상' : '중간');
-      if (!item || seen.has(item.url)) return;
-      seen.add(item.url);
+      const item = svgCandidate(svg, '페이지 SVG', '중간');
+      if (!item) return;
+      const key = item.fp || item.url;
+      if (seen.has(key)) return;
+      seen.add(key);
       out.push(item);
     });
-    $$('img, object, embed, image').forEach(node => {
+    $$('img, object, embed').forEach(node => {
       const url = abs(node.currentSrc || node.src || node.getAttribute?.('src') || node.getAttribute?.('data') || '');
       if (!url || !/\.svg(?:$|[?#])/i.test(url) || node.closest?.('#sl-host')) return;
-      if (seen.has(url)) return;
-      seen.add(url);
+      if (isUiSvg(node, url, fileName(url))) return;
+      let path = url;
+      try { path = new URL(url).pathname; } catch { /* keep */ }
+      if (seen.has(path)) return;
+      seen.add(path);
       out.push(candidate(url, '페이지 SVG', 'svg', {
-        element: node, confidence: '높음', relation: 'page', name: fileName(url)
+        element: node, confidence: '높음', relation: 'page', name: fileName(url), fp: path
       }));
     });
-    return out.slice(0, 500);
+    return out.slice(0, 80);
   }
 
   function collectYouTube(target) {
@@ -442,10 +487,15 @@
     return { images, videos };
   }
 
+  function itemKey(item) {
+    if (item.type === 'svg') return `svg:${item.fp || item.name || item.url}`;
+    return item.url;
+  }
+
   function dedupe(items) {
     const map = new Map();
     items.filter(Boolean).forEach(item => {
-      const key = item.url;
+      const key = itemKey(item);
       const old = map.get(key);
       if (!old || SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
     });
@@ -563,11 +613,13 @@
 
   function mergePageMedia() {
     const incoming = collectPageMedia();
-    const have = new Set(state.candidates.map(item => item.url));
+    const have = new Set(state.candidates.map(itemKey));
     let added = 0;
     incoming.forEach(item => {
-      if (!item?.url || have.has(item.url)) return;
-      have.add(item.url);
+      if (!item?.url) return;
+      const key = itemKey(item);
+      if (have.has(key)) return;
+      have.add(key);
       state.candidates.push(item);
       added += 1;
     });
@@ -1045,7 +1097,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.10</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.11</small></h2>
+
 
 
 
@@ -1079,8 +1132,16 @@
       updateCounts();
       const list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
       if (!list.length) {
-        main.innerHTML = '<div class="sl-empty">표시할 미디어가 없습니다.</div>';
+      if (!list.length) {
+        const empty = state.activeTab === 'video'
+          ? videoEmptyMessage()
+          : state.activeTab === 'svg'
+            ? '중복을 제외한 SVG가 없습니다. 아이콘을 직접 Alt+클릭하면 선택됩니다.'
+            : '표시할 미디어가 없습니다.';
+        main.innerHTML = `<div class="sl-empty">${empty}</div>`;
         return;
+      }
+
       }
       if (state.activeTab === 'selected') {
         const item = list[0];
@@ -1263,12 +1324,13 @@
     }
     if (window !== window.top) return;
     if (ev.data.type === 'pageMedia' && Array.isArray(ev.data.data)) {
-      const have = new Set(state.candidates.map(item => item.url));
+      const have = new Set(state.candidates.map(itemKey));
       ev.data.data.forEach(item => {
-        if (item?.url && !have.has(item.url)) {
-          have.add(item.url);
-          state.candidates.push(item);
-        }
+        if (!item?.url) return;
+        const key = itemKey(item);
+        if (have.has(key)) return;
+        have.add(key);
+        state.candidates.push(item);
       });
       state.redraw?.();
       return;
