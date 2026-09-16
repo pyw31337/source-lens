@@ -106,6 +106,7 @@ function zipStore(files) {
   return out;
 }
 
+function downloadBase64(mime, base64, filename) {
   return new Promise(resolve => {
     chrome.downloads.download({
       url: `data:${mime};base64,${base64}`,
