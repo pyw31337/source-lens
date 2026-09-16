@@ -120,55 +120,64 @@
     return shadow;
   }
 
+  function isChromeImage(node, url) {
+    const src = url || node?.currentSrc || node?.src || '';
+    if (/logo|favicon|image__logo|\/ci\/|brand[_-]?mark|sprite\.(?:png|gif|svg)/i.test(src)) return true;
+    if (node?.closest?.('header, nav, [role="banner"], .header, #header, .gds-header, footer')) return true;
+    return false;
+  }
+
   function mediaAtPoint(x, y) {
     const stack = document.elementsFromPoint(x, y).filter(node => node !== state.host && !node.closest?.('#sl-host'));
+    const hitRect = (node, pad = 0) => {
+      const r = node.getBoundingClientRect();
+      return r.width >= 24 && r.height >= 24
+        && x >= r.left - pad && x <= r.right + pad && y >= r.top - pad && y <= r.bottom + pad;
+    };
+    const imgsUnder = $$('img').filter(img => !img.closest?.('#sl-host') && !isChromeImage(img) && hitRect(img, 4))
+      .sort((a, b) => {
+        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+        return (ra.width * ra.height) - (rb.width * rb.height);
+      });
+    if (imgsUnder.length) {
+      const small = imgsUnder[0];
+      const sr = small.getBoundingClientRect();
+      if (sr.width < 80 || sr.height < 80) {
+        const large = imgsUnder.find(img => {
+          const r = img.getBoundingClientRect();
+          return r.width >= 120 && r.height >= 120;
+        });
+        if (large) return large;
+      }
+      return small;
+    }
+    const videosUnder = $$('video').filter(v => !v.closest?.('#sl-host') && hitRect(v));
+    if (videosUnder[0]) return videosUnder[0];
+    const svgsUnder = $$('svg').filter(s => !s.closest?.('#sl-host') && hitRect(s, 2));
+    if (svgsUnder[0] && !imgsUnder.length) return svgsUnder[0];
     const found = [];
     for (const node of stack) {
       const media = node.tagName && /^(IMG|VIDEO|SVG|PICTURE)$/.test(node.tagName)
         ? node
         : node.closest?.('img, video, svg, picture');
-      if (!media || found.includes(media)) continue;
+      if (!media || found.includes(media) || isChromeImage(media)) continue;
       const r = media.getBoundingClientRect();
-      if (media.tagName !== 'SVG' && (r.width < 40 || r.height < 40)) continue;
+      if (media.tagName !== 'SVG' && (r.width < 24 || r.height < 24)) continue;
       found.push(media);
     }
-    const imgs = found.filter(n => n.tagName === 'IMG' || n.tagName === 'PICTURE');
-    const video = found.find(n => n.tagName === 'VIDEO');
-    const svg = found.find(n => n.tagName === 'SVG');
-    if (isCommerce() && imgs.length) {
-      const tall = imgs.find(img => {
-        const r = img.getBoundingClientRect();
-        return r.height > r.width * 2 && y >= r.top && y <= r.bottom;
-      });
-      if (tall) return tall;
-      const product = imgs.find(img => {
-        const r = img.getBoundingClientRect();
-        const a = r.height / Math.max(r.width, 1);
-        return r.width >= 80 && a > 0.45 && a < 1.9;
-      });
-      if (product) return product;
-    }
-    if (svg && !imgs.length && !video) return svg;
-    if (imgs[0] && video) {
-      if (!video.paused && video.readyState >= 2 && video.videoWidth > 0) return video;
-      return imgs[0];
-    }
     if (found[0]) return found[0];
-    if (isCommerce()) {
-      const nearby = $$('img').filter(img => {
-        if (img.closest?.('#sl-host')) return false;
-        const r = img.getBoundingClientRect();
-        if (r.width < 90 || r.height < 90) return false;
-        const a = r.height / Math.max(r.width, 1);
-        if (a > 2.2) return false;
-        return Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y) < 320;
-      }).sort((a, b) => {
-        const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
-        return rb.width * rb.height - ra.width * ra.height;
-      });
-      if (nearby[0]) return nearby[0];
-    }
-    return stack[0] || document.body;
+    const nearby = $$('img').filter(img => {
+      if (img.closest?.('#sl-host') || isChromeImage(img)) return false;
+      const r = img.getBoundingClientRect();
+      if (r.width < 48 || r.height < 48) return false;
+      return Math.hypot(r.left + r.width / 2 - x, r.top + r.height / 2 - y) < 220;
+    }).sort((a, b) => {
+      const ra = a.getBoundingClientRect(), rb = b.getBoundingClientRect();
+      const da = Math.hypot(ra.left + ra.width / 2 - x, ra.top + ra.height / 2 - y);
+      const db = Math.hypot(rb.left + rb.width / 2 - x, rb.top + rb.height / 2 - y);
+      return da - db;
+    });
+    return nearby[0] || stack[0] || null;
   }
 
   function pathKey(url) {
@@ -204,11 +213,24 @@
   }
 
   function collectTarget(target) {
+    if (!target) return { media: null, candidates: [] };
     const media = target?.matches?.('img,video,svg,picture')
       ? target
-      : target?.closest?.('img,video,svg,picture') || target?.querySelector?.('img,video,svg');
+      : target?.closest?.('img,video,svg,picture');
     const out = [];
-    if (!media) return { media: null, candidates: out };
+    if (!media) {
+      let cur = target;
+      for (let i = 0; i < 6 && cur; i++) {
+        const bg = getComputedStyle(cur).backgroundImage || '';
+        const match = /url\(["']?(https?:[^"')]+)["']?\)/.exec(bg);
+        if (match && SL.isImageUrl(match[1]) && !isChromeImage(cur, match[1])) {
+          out.push(candidate(match[1], '배경 이미지', 'image', { confidence: '최상' }));
+          return { media: cur, candidates: out.filter(Boolean) };
+        }
+        cur = cur.parentElement;
+      }
+      return { media: null, candidates: out };
+    }
     const tag = media.tagName.toLowerCase();
     if (tag === 'svg') {
       const code = sanitizeSvg(new XMLSerializer().serializeToString(media));
@@ -417,6 +439,7 @@
     const w = img.naturalWidth || img.width || r.width || 0;
     const h = img.naturalHeight || img.height || r.height || 0;
     if (Math.min(w, h) < 96) return null;
+    if (isChromeImage(img, url)) return null;
     if (/s150x150|s320x320|_s\.(?:jpe?g|png|webp)/i.test(url) && Math.min(w, h) < 400) return null;
     return candidate(url, '페이지 이미지', 'image', {
       element: img, confidence: '중간', width: img.naturalWidth || 0, height: img.naturalHeight || 0, relation: 'page'
@@ -840,7 +863,7 @@
         <button class="sl-btn sl-slice-auto" type="button">자동 구간</button>
         <select class="sl-slice-format"><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WebP</option></select>
         <button class="sl-btn sl-slice-export" type="button">분할 저장</button></div></header>
-        <div class="sl-slice-viewport"><img class="sl-slice-image" alt=""><div class="sl-slice-lines"></div></div>
+        <div class="sl-slice-viewport"><div class="sl-slice-stage"><img class="sl-slice-image" alt=""><div class="sl-slice-lines"></div></div></div>
         <footer class="sl-slice-footer"><span class="sl-slice-count"></span><span>${image.naturalWidth}×${image.naturalHeight}px</span></footer></div>`;
       const viewport = layer.querySelector('.sl-slice-viewport');
       const preview = layer.querySelector('.sl-slice-image');
@@ -863,7 +886,7 @@
           let dragging = false;
           const move = ev => {
             if (!dragging) return;
-            const rect = viewport.getBoundingClientRect();
+            const rect = preview.getBoundingClientRect();
             positions[lineIndex] = Math.max(0.01, Math.min(0.99, (ev.clientY - rect.top) / rect.height));
             renderLines();
           };
@@ -878,14 +901,16 @@
         countEl.textContent = `${positions.length + 1}개 이미지로 분할`;
       };
       layer.querySelector('.sl-slice-add').onclick = () => {
-        const sorted = [0, ...positions, 1].sort((a, b) => a - b);
-        let largest = 0, midpoint = 0.5;
-        for (let i = 0; i < sorted.length - 1; i++) {
-          const gap = sorted[i + 1] - sorted[i];
-          if (gap > largest) { largest = gap; midpoint = sorted[i] + gap / 2; }
-        }
-        if (positions.length < 40) positions.push(midpoint);
+        const view = viewport.getBoundingClientRect();
+        const stage = preview.getBoundingClientRect();
+        const visibleTop = Math.max(view.top, stage.top);
+        const visibleBottom = Math.min(view.bottom, stage.bottom);
+        const y = (visibleTop + visibleBottom) / 2;
+        const pos = (y - stage.top) / Math.max(1, stage.height);
+        if (positions.length < 40) positions.push(Math.max(0.01, Math.min(0.99, pos)));
         renderLines();
+        const lineY = pos * preview.offsetHeight - viewport.clientHeight / 2;
+        viewport.scrollTop = Math.max(0, lineY);
       };
       layer.querySelector('.sl-slice-auto').onclick = () => {
         const cuts = suggestSliceCuts(image);
@@ -915,13 +940,6 @@
       };
       uiRoot().append(layer);
       renderLines();
-      if (image.naturalHeight > image.naturalWidth * 2.2) {
-        const cuts = suggestSliceCuts(image);
-        if (cuts.length) {
-          positions.splice(0, positions.length, ...cuts);
-          renderLines();
-        }
-      }
     };
     image.onerror = () => {
       URL.revokeObjectURL(sourceUrl);
@@ -951,7 +969,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.6</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.7</small></h2>
+
 
 
 
@@ -1072,6 +1091,8 @@
   }
 
   async function inspect(target, seed = []) {
+    if (!target) return;
+
     const collected = collectTarget(target);
     state.selected = target;
     const tag = (collected.media?.tagName || target?.tagName || '').toUpperCase();
@@ -1106,7 +1127,8 @@
     } else {
       list = list.filter(item => (item.type === 'image' && SL.isImageUrl(item.url)) || item.type === 'svg');
     }
-    state.picked = list[0] || null;
+    state.picked = list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
+
     state.candidates = dedupe([...list, ...collectPageMedia()]);
     state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
