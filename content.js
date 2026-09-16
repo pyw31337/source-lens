@@ -107,7 +107,7 @@
     if (!value) return null;
     if (typeof SL.unwrapMediaUrl === 'function') value = abs(SL.unwrapMediaUrl(value)) || value;
     if (SL.isUiJunk(value) && hint !== 'svg') return null;
-    if (hint !== 'svg' && hint !== 'video' && typeof SL.upgradeMediaUrl === 'function') {
+    if (hint !== 'svg' && hint !== 'video' && !SL.SIGNED.test(value) && !/cdninstagram|fbcdn\.net|scontent/i.test(value) && typeof SL.upgradeMediaUrl === 'function') {
       const upgraded = SL.upgradeMediaUrl(value);
       if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded))) value = upgraded;
     }
@@ -324,9 +324,14 @@
   }
 
   function collectImgLike(node, out, media) {
-    out.push(candidate(node.currentSrc || node.src, 'img.currentSrc', 'image', { element: media, confidence: '최상' }));
+    const display = node.currentSrc || node.src || '';
     const best = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
-    if (best) out.push(candidate(best, 'srcset 최대', 'image', { element: media, confidence: '높음' }));
+    const pick = (best && itemPixel({ url: abs(best) }) > itemPixel({ url: abs(display) })) ? best : display;
+    if (pick) {
+      out.push(candidate(pick, pick === best ? 'srcset 최대' : 'img.currentSrc', 'image', {
+        element: media, confidence: '최상'
+      }));
+    }
     ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
       'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
       out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
@@ -607,9 +612,12 @@
         map.set(key, item);
         return;
       }
-      const oldArea = (old.width || 0) * (old.height || 0);
-      const newArea = (item.width || 0) * (item.height || 0);
-      if (newArea > oldArea || SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
+      const oldPx = item.type === 'image' ? itemPixel(old) : 0;
+      const newPx = item.type === 'image' ? itemPixel(item) : 0;
+      if (newPx > oldPx) { map.set(key, item); return; }
+      if (newPx && newPx < oldPx) return;
+      if (SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
+
     });
     return [...map.values()];
   }
@@ -865,7 +873,12 @@
     const node = document.createElement('img');
     node.className = className || '';
     node.alt = item.source || '';
-    node.src = item.url;
+    node.referrerPolicy = 'no-referrer-when-downgrade';
+    const live = item.element?.tagName === 'IMG' && item.element.currentSrc;
+    node.src = live || item.url;
+    node.onerror = () => {
+      if (live && node.src !== item.url) node.src = item.url;
+    };
     if (isTallItem(item) && /sl-preview|sl-lightbox-media/.test(className || '')) {
       const wrap = document.createElement('div');
       wrap.className = 'sl-tall-wrap';
@@ -1144,12 +1157,16 @@
       return;
     }
     const name = downloadName(item);
-    if (/^https?:/i.test(item.url) && !item.temporary) {
-      chrome.runtime.sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${name}` }, result => {
-        if (!result?.ok) fetchBytes(item.url).then(blob => downloadBlob(blob, name));
+    const url = (item.element?.currentSrc && /^https?:/i.test(item.element.currentSrc)) ? item.element.currentSrc : item.url;
+    if (/^https?:/i.test(url) && !item.temporary) {
+      chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `source-lens/${name}` }, result => {
+        if (result?.ok) return;
+        if (SL.SIGNED.test(url) || /cdninstagram|fbcdn\.net|scontent/i.test(url)) return;
+        fetchBytes(url).then(blob => downloadBlob(blob, name)).catch(() => {});
       });
       return;
     }
+    if (SL.SIGNED.test(url || '') || /cdninstagram|fbcdn\.net|scontent/i.test(url || '')) return;
     fetchBytes(item.url).then(blob => downloadBlob(blob, name)).catch(() => {
       if (state.postUrl) window.open(state.postUrl, '_blank', 'noopener');
     });
@@ -1472,7 +1489,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.4</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.5</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1574,28 +1591,18 @@
         saveAll.textContent = `모두 저장 (${Math.min(list.length, 40)})`;
         saveAll.onclick = async () => {
           saveAll.disabled = true;
-          for (const item of list.slice(0, 40)) {
+          const targets = list.filter(item => itemPixel(item) >= 320 || !itemPixel(item)).slice(0, 40);
+          let n = 0;
+          for (const item of targets) {
             saveItem(item);
-            await new Promise(r => setTimeout(r, 280));
+            n += 1;
+            saveAll.textContent = `저장 ${n}/${targets.length}`;
+            await new Promise(r => setTimeout(r, 450));
           }
-          saveAll.textContent = '저장 요청 완료';
+          saveAll.textContent = `${targets.length}개 저장 요청`;
           saveAll.disabled = false;
         };
-        const copyAll = document.createElement('button');
-        copyAll.type = 'button';
-        copyAll.className = 'sl-btn';
-        const signed = ['instagram', 'facebook', 'tiktok'].includes(siteKind());
-        copyAll.textContent = signed ? '게시물 주소 복사' : '이미지 주소 복사';
-        copyAll.title = signed
-          ? 'CDN 주소는 만료되어 URL signature mismatch가 납니다. 게시물 주소를 복사합니다.'
-          : '현재 목록의 파일 주소를 복사합니다.';
-        copyAll.onclick = () => {
-          const urls = signed
-            ? SL.unique([state.postUrl, location.href].filter(Boolean))
-            : list.map(item => item.url).filter(Boolean);
-          copy(urls.join('\n'), copyAll);
-        };
-        bar.append(saveAll, copyAll);
+        bar.append(saveAll);
         const zipBtn = document.createElement('button');
         zipBtn.type = 'button';
         zipBtn.className = 'sl-btn sl-btn-brand';
