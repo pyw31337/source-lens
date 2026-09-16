@@ -6,7 +6,8 @@
   const state = {
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
     candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
-    profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: []
+    profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
+    filterLarge: false, recorder: null, captureTimer: 0
   };
 
   const $ = (sel, root = document) => root.querySelector(sel);
@@ -129,9 +130,9 @@
     extra.textContent = `
       :host {
         --sl-brand: #3ecf8e;
-        --sl-brand-strong: #229968;
-        --sl-ink: #1c1c1c;
-        font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+        --sl-brand-hover: #65d9a5;
+        --sl-ink: #ededed;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
       }
       #sl-root { pointer-events: none; position: fixed; inset: 0; }
       #sl-panel, .sl-lightbox, .sl-slice-editor { pointer-events: auto; }
@@ -807,11 +808,8 @@
   function actionButton(kind, label, onClick) {
     const btn = document.createElement('button');
     btn.type = 'button';
-    btn.className = kind === 'primary' ? 'sl-btn sl-copy' : 'sl-btn';
+    btn.className = kind === 'primary' ? 'sl-btn sl-btn-brand' : 'sl-btn';
     btn.textContent = label;
-    btn.style.cssText = kind === 'primary'
-      ? 'display:flex;align-items:center;justify-content:center;min-height:42px;background:#229968;border:1px solid #187d54;color:#fff;border-radius:7px;cursor:pointer;font:650 12px/1.2 Inter,sans-serif'
-      : 'display:flex;align-items:center;justify-content:center;min-height:42px;background:#fff;border:1px solid #d1d5db;color:#1c1c1c;border-radius:7px;cursor:pointer;font:550 12px/1.2 Inter,sans-serif';
     btn.onclick = onClick;
     return btn;
   }
@@ -997,12 +995,21 @@
     });
   }
 
+  function downloadName(item) {
+    const host = (location.hostname || 'web').replace(/^www\./, '');
+    const raw = fileName(item?.url) || item?.type || 'media';
+    const base = raw.replace(/\.[^.]+$/, '') || 'media';
+    const ext = (/\.([a-z0-9]{2,5})$/i.exec(raw) || [])[1]
+      || (item?.type === 'svg' ? 'svg' : item?.type === 'video' ? 'webm' : 'jpg');
+    return `${host}-${base}`.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 70) + `.${ext}`;
+  }
+
   function saveItem(item) {
     if (item.type === 'svg' && item.code) {
-      downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), `${fileName(item.url) || 'image'}.svg`);
+      downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), downloadName(item));
       return;
     }
-    const name = fileName(item.url) || (item.type === 'video' ? 'video.mp4' : 'image.jpg');
+    const name = downloadName(item);
     if (/^https?:/i.test(item.url) && !item.temporary) {
       chrome.runtime.sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${name}` }, result => {
         if (!result?.ok) fetchBytes(item.url).then(blob => downloadBlob(blob, name));
@@ -1331,7 +1338,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.6.1</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.7.0</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1376,6 +1383,9 @@
       }
       if (state.activeTab !== 'selected') {
         list.sort((a, b) => ((b.width || 0) * (b.height || 0)) - ((a.width || 0) * (a.height || 0)) || String(b.confidence).length - String(a.confidence).length);
+      }
+      if (state.activeTab === 'image' && state.filterLarge) {
+        list = list.filter(item => !item.width || Math.max(item.width, item.height || 0) >= 400);
       }
       if (state.activeTab === 'selected') {
         const item = list[0];
@@ -1430,7 +1440,7 @@
         bar.className = 'sl-bulk';
         const saveAll = document.createElement('button');
         saveAll.type = 'button';
-        saveAll.className = 'sl-btn';
+        saveAll.className = 'sl-btn sl-btn-brand';
         saveAll.textContent = `모두 저장 (${Math.min(list.length, 40)})`;
         saveAll.onclick = async () => {
           saveAll.disabled = true;
@@ -1441,19 +1451,32 @@
           saveAll.textContent = '저장 요청 완료';
           saveAll.disabled = false;
         };
-        bar.append(saveAll);
+        const copyAll = document.createElement('button');
+        copyAll.type = 'button';
+        copyAll.className = 'sl-btn';
+        copyAll.textContent = 'URL 모두 복사';
+        copyAll.onclick = () => copy(list.map(item => item.url).filter(Boolean).join('\n'), copyAll);
+        bar.append(saveAll, copyAll);
+        if (state.activeTab === 'image') {
+          const large = document.createElement('button');
+          large.type = 'button';
+          large.className = 'sl-btn' + (state.filterLarge ? ' is-on' : '');
+          large.textContent = '큰 것만';
+          large.onclick = () => { state.filterLarge = !state.filterLarge; draw(); };
+          bar.append(large);
+        }
         if (state.activeTab === 'svg') {
-          const copyAll = document.createElement('button');
-          copyAll.type = 'button';
-          copyAll.className = 'sl-btn';
-          copyAll.textContent = '코드 모두 복사';
-          copyAll.onclick = async () => {
+          const copyCodes = document.createElement('button');
+          copyCodes.type = 'button';
+          copyCodes.className = 'sl-btn';
+          copyCodes.textContent = '코드 모두 복사';
+          copyCodes.onclick = async () => {
             const codes = list.map(item => svgSource(item)).filter(Boolean);
             if (!codes.length) return;
             await navigator.clipboard.writeText(codes.join('\n\n'));
-            copyAll.textContent = `${codes.length}개 복사됨`;
+            copyCodes.textContent = `${codes.length}개 복사됨`;
           };
-          bar.append(copyAll);
+          bar.append(copyCodes);
         }
         main.append(bar);
         const grid = document.createElement('div');
@@ -1631,5 +1654,13 @@
     inspect(target, seed);
   });
 
-  window.addEventListener('keydown', ev => { if (ev.key === 'Escape') closePanel(); });
+  window.addEventListener('keydown', ev => {
+    if (ev.key === 'Escape') { closePanel(); return; }
+    if (!state.panel) return;
+    if (ev.target && /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) return;
+    const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg' };
+    if (tabs[ev.key]) { state.activeTab = tabs[ev.key]; state.redraw?.(); }
+    if ((ev.key === 's' || ev.key === 'S') && state.picked) saveItem(state.picked);
+    if ((ev.key === 'c' || ev.key === 'C') && state.picked) copy(state.picked.url);
+  });
 })();
