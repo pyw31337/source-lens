@@ -860,7 +860,7 @@
       });
       actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
     }
-    if (item.type === 'video' || ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'naver'].includes(siteKind())) {
+    if (item.type === 'video') {
       actions.append(actionButton('primary', state.recorder ? '지금 저장' : '원클릭 저장', ev => oneClickSaveVideo(item, ev.currentTarget)));
       actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
     }
@@ -906,6 +906,13 @@
 
   async function oneClickSaveVideo(item, button) {
     const setLabel = text => { if (button) button.textContent = text; };
+    if (item && (item.type === 'image' || item.type === 'svg' || SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url || ''))) {
+      saveItem(item);
+      setLabel('이미지 저장');
+      captureHud('이미지로 저장했습니다');
+      setTimeout(() => { captureHud(''); setLabel('저장'); }, 1600);
+      return { ok: true, mode: 'image' };
+    }
     if (state.recorder) {
       try { state.recorder.stop(); } catch { /* ignore */ }
       setLabel('저장 중…');
@@ -923,8 +930,15 @@
       setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 1800);
       return { ok: true, mode: 'file' };
     }
-    const video = pickCaptureVideo(item);
-    if (!video) {
+    const blocked = ['instagram', 'facebook', 'tiktok'].includes(siteKind());
+    if (blocked) {
+      setLabel('녹화 불가');
+      captureHud('이 사이트는 브라우저 녹화가 막혀 있습니다. 이미지는 「저장」을 누르세요.');
+      setTimeout(() => captureHud(''), 2800);
+      return { ok: false, error: '인스타/페북/틱톡은 원본 주소가 있을 때만 저장됩니다. 사진이면 저장 버튼을 쓰세요.' };
+    }
+    const video = item?.element?.tagName === 'VIDEO' ? item.element : pickCaptureVideo(item);
+    if (!video || !video.videoWidth) {
       setLabel('영상 없음');
       captureHud('재생할 영상을 먼저 열어 주세요');
       setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 2000);
@@ -942,7 +956,7 @@
       } catch { /* MSE — record */ }
     }
     const stream = video.captureStream?.() || video.mozCaptureStream?.();
-    if (!stream || !stream.getTracks().length) {
+    if (!stream || !stream.getVideoTracks().length) {
       setLabel('녹화 불가');
       return { ok: false, error: '이 플레이어는 브라우저 녹화가 막혀 있습니다.' };
     }
@@ -961,11 +975,13 @@
       video.removeEventListener('ended', onEnded);
       clearInterval(state.captureTimer);
       state.recorder = null;
-      captureHud(chunks.length ? '저장했습니다' : '녹화 데이터가 없습니다');
+      const blob = new Blob(chunks, { type: rec.mimeType || 'video/webm' });
+      const tooSmall = blob.size < 80_000;
+      captureHud(tooSmall ? '녹화 파일이 비어 있습니다. 이 사이트는 녹화가 막혀 있습니다.' : '저장했습니다');
       setLabel('원클릭 저장');
-      setTimeout(() => captureHud(''), 1800);
-      if (!chunks.length) return;
-      downloadBlob(new Blob(chunks, { type: rec.mimeType || 'video/webm' }), `capture-${Date.now()}.webm`);
+      setTimeout(() => captureHud(''), 2800);
+      if (tooSmall) return;
+      downloadBlob(blob, `capture-${Date.now()}.webm`);
     };
     video.addEventListener('ended', onEnded);
     rec.start(500);
@@ -1408,7 +1424,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.1</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.2</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1660,7 +1676,7 @@
     }
     render();
     requestFrameMedia();
-    if (clickedVideo) oneClickSaveVideo(state.picked);
+    if (clickedVideo && state.picked?.type === 'video') oneClickSaveVideo(state.picked);
   }
 
   window.addEventListener('mousedown', ev => {
