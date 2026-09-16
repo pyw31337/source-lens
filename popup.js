@@ -71,4 +71,34 @@ $('#oneClickVideo').onclick = async () => {
   else if (result.ok) $('#status').textContent = '재생이 끝나면 자동 저장됩니다. 탭을 유지하세요.';
   else $('#status').textContent = result.error || '영상을 찾지 못했습니다. 영상을 재생한 뒤 다시 눌러 주세요.';
 };
+$('#zip').onclick = () => {
+  const items = selected();
+  if (!items.length) { $('#status').textContent = '이미지를 선택하세요.'; return; }
+  $('#status').textContent = 'ZIP 만드는 중…';
+  api.runtime.sendMessage({
+    type: 'zipDownload',
+    items: items.map((x, i) => ({ url: x.url, name: `${String(i + 1).padStart(2, '0')}-${x.name || 'image'}` })),
+    filename: 'source-lens/selected.zip'
+  }, result => {
+    $('#status').textContent = result?.ok ? `ZIP ${result.count}개 저장` : (result?.error || 'ZIP 실패');
+  });
+};
+
+function loadHistory() {
+  api.storage.local.get('slHistory', data => {
+    const box = $('#history');
+    box.textContent = '';
+    (data.slHistory || []).slice(0, 8).forEach(row => {
+      const a = document.createElement('a');
+      a.className = 'hist';
+      a.href = row.page;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.innerHTML = `<b>${esc(row.title || row.host)}</b><span>${esc(row.host)} · ${(row.items || []).length}개 · ${new Date(row.ts).toLocaleString()}</span>`;
+      box.append(a);
+    });
+  });
+}
+
 load();
+loadHistory();

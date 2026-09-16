@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Source Lens",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "description": "페이지에서 이미지·영상·SVG의 실제 리소스 URL을 찾고, 만료·세션 제약을 설명한 뒤 저장합니다.",
   "permissions": [
     "contextMenus",

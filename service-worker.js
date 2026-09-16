@@ -33,7 +33,79 @@ async function fetchMedia(url) {
   throw new Error(errors.join(' | ') || 'fetch failed');
 }
 
-function downloadBase64(mime, base64, filename) {
+function crcTable() {
+  if (crcTable.t) return crcTable.t;
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+    t[n] = c >>> 0;
+  }
+  crcTable.t = t;
+  return t;
+}
+
+function crc32(bytes) {
+  const t = crcTable();
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = t[(c ^ bytes[i]) & 255] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function zipStore(files) {
+  const encoder = new TextEncoder();
+  const parts = [];
+  const centrals = [];
+  let offset = 0;
+  for (const file of files) {
+    const name = encoder.encode(file.name.replace(/\\/g, '/').slice(0, 180));
+    const data = file.bytes instanceof Uint8Array ? file.bytes : new Uint8Array(file.bytes || []);
+    const crc = crc32(data);
+    const local = new Uint8Array(30 + name.length);
+    const lv = new DataView(local.buffer);
+    lv.setUint32(0, 0x04034b50, true);
+    lv.setUint16(4, 20, true);
+    lv.setUint16(6, 0x0800, true);
+    lv.setUint32(14, crc, true);
+    lv.setUint32(18, data.length, true);
+    lv.setUint32(22, data.length, true);
+    lv.setUint16(26, name.length, true);
+    local.set(name, 30);
+    parts.push(local, data);
+    const central = new Uint8Array(46 + name.length);
+    const cv = new DataView(central.buffer);
+    cv.setUint32(0, 0x02014b50, true);
+    cv.setUint16(4, 20, true);
+    cv.setUint16(6, 20, true);
+    cv.setUint16(8, 0x0800, true);
+    cv.setUint32(16, crc, true);
+    cv.setUint32(20, data.length, true);
+    cv.setUint32(24, data.length, true);
+    cv.setUint16(28, name.length, true);
+    cv.setUint32(42, offset, true);
+    central.set(name, 46);
+    centrals.push(central);
+    offset += local.length + data.length;
+  }
+  const centralStart = offset;
+  for (const block of centrals) {
+    parts.push(block);
+    offset += block.length;
+  }
+  const eocd = new Uint8Array(22);
+  const ev = new DataView(eocd.buffer);
+  ev.setUint32(0, 0x06054b50, true);
+  ev.setUint16(8, files.length, true);
+  ev.setUint16(10, files.length, true);
+  ev.setUint32(12, offset - centralStart, true);
+  ev.setUint32(16, centralStart, true);
+  parts.push(eocd);
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) { out.set(p, o); o += p.length; }
+  return out;
+}
+
   return new Promise(resolve => {
     chrome.downloads.download({
       url: `data:${mime};base64,${base64}`,
@@ -117,7 +189,46 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })();
     return true;
   }
+  if (message?.type === 'zipDownload') {
+    (async () => {
+      try {
+        const files = [];
+        const items = (message.items || []).slice(0, 40);
+        for (const item of items) {
+          try {
+            const name = (item.name || `file-${files.length + 1}`).replace(/[\\/:*?"<>|]+/g, '_');
+            if (item.code) {
+              files.push({ name, bytes: new TextEncoder().encode(item.code) });
+              continue;
+            }
+            if (!item.url || !/^https?:|^data:/i.test(item.url)) continue;
+            const { buffer } = await fetchMedia(item.url);
+            files.push({ name, bytes: new Uint8Array(buffer) });
+          } catch { /* skip one */ }
+        }
+        if (!files.length) {
+          sendResponse({ ok: false, error: '압축할 파일을 받지 못했습니다.' });
+          return;
+        }
+        const zip = zipStore(files);
+        const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
+        chrome.downloads.download({
+          url,
+          filename: message.filename || 'source-lens/media.zip',
+          saveAs: false,
+          conflictAction: 'uniquify'
+        }, () => {
+          setTimeout(() => URL.revokeObjectURL(url), 15000);
+          sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message || '', count: files.length });
+        });
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error) });
+      }
+    })();
+    return true;
+  }
   if (message?.type === 'downloadUrl') {
+
     chrome.downloads.download({
       url: message.url,
       filename: message.filename || 'source-lens/media',

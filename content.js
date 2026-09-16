@@ -214,6 +214,35 @@
     }
   }
 
+  function canonicalImageKey(url) {
+    try {
+      const u = new URL(url, location.href);
+      ['w', 'h', 'width', 'height', 'q', 'quality', 'dpr', 'fit', 'crop', 'auto', 'cs', 's', 'size', 'type', 't', 'w2', 'rs'].forEach(k => u.searchParams.delete(k));
+      const path = u.pathname
+        .replace(/\/thumbnails\/remote\/\d+x\d+(?:ex)?\//ig, '/')
+        .replace(/\/(?:small|medium|large|thumb|original)\//ig, '/')
+        .replace(/\/\d{2,4}x\d{2,4}\//g, '/')
+        .replace(/_(?:small|medium|large|thumb|teaser|n|o)\b/ig, '')
+        .replace(/_\d{2,4}(?=\.(?:jpe?g|png|webp))/i, '');
+      return `${u.hostname.replace(/^www\./, '')}${path}`;
+    } catch {
+      return url;
+    }
+  }
+
+  function largestSrcset(srcset) {
+    let best = '', score = -1;
+    String(srcset || '').split(',').forEach(part => {
+      const bits = part.trim().split(/\s+/);
+      const url = bits[0];
+      if (!url) return;
+      const desc = bits[1] || '';
+      const n = parseFloat(desc) || 1;
+      if (n >= score) { score = n; best = url; }
+    });
+    return best;
+  }
+
   function isLightPaint(value) {
     const v = String(value || '').trim().toLowerCase();
     if (!v || v === 'currentcolor' || v === 'inherit' || v === 'white' || v === '#fff' || v === '#ffffff' || v === '#fefefe' || v === 'rgb(255,255,255)') return true;
@@ -279,8 +308,8 @@
 
   function collectImgLike(node, out, media) {
     out.push(candidate(node.currentSrc || node.src, 'img.currentSrc', 'image', { element: media, confidence: '최상' }));
-    (node.srcset || node.getAttribute('srcset') || '').split(',').map(p => p.trim().split(/\s+/)[0]).filter(Boolean)
-      .forEach(url => out.push(candidate(url, 'srcset', 'image', { element: media, confidence: '높음' })));
+    const best = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
+    if (best) out.push(candidate(best, 'srcset 최대', 'image', { element: media, confidence: '높음' }));
     ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
       'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
       out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
@@ -532,6 +561,7 @@
 
   function itemKey(item) {
     if (item.type === 'svg') return `svg:${item.fp || item.name || item.url}`;
+    if (item.type === 'image') return `img:${canonicalImageKey(item.url)}`;
     return item.url;
   }
 
@@ -540,7 +570,13 @@
     items.filter(Boolean).forEach(item => {
       const key = itemKey(item);
       const old = map.get(key);
-      if (!old || SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
+      if (!old) {
+        map.set(key, item);
+        return;
+      }
+      const oldArea = (old.width || 0) * (old.height || 0);
+      const newArea = (item.width || 0) * (item.height || 0);
+      if (newArea > oldArea || SL.confidenceScore(item.confidence) > SL.confidenceScore(old.confidence)) map.set(key, item);
     });
     return [...map.values()];
   }
@@ -633,8 +669,7 @@
     }
     if (kind === 'design' || kind === 'stock') {
       $$('img[srcset], source[srcset]').forEach(node => {
-        const parts = (node.srcset || node.getAttribute('srcset') || '').split(',').map(p => p.trim()).filter(Boolean);
-        const last = parts[parts.length - 1]?.split(/\s+/)[0];
+        const last = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
         if (last) push(last, 'srcset 최대', { confidence: '최상' });
       });
     }
@@ -662,10 +697,8 @@
         if (v) push(v, attr, { element: node.tagName === 'IMG' ? node : null, confidence: '중간' });
       });
       const srcset = node.srcset || node.getAttribute?.('srcset') || '';
-      srcset.split(',').forEach(part => {
-        const u = part.trim().split(/\s+/)[0];
-        if (u) push(u, 'srcset', { confidence: '중간' });
-      });
+      const best = largestSrcset(srcset);
+      if (best) push(best, 'srcset 최대', { confidence: '높음' });
     });
     $$('[style*="background"]').slice(0, 80).forEach(node => {
       const bg = getComputedStyle(node).backgroundImage || '';
@@ -693,10 +726,8 @@
         if (v) push(v, `상품 ${attr}`, { element: node.tagName === 'IMG' ? node : null, confidence: '중간' });
       });
       const srcset = node.srcset || node.getAttribute?.('srcset') || '';
-      srcset.split(',').forEach(part => {
-        const u = part.trim().split(/\s+/)[0];
-        if (u) push(u, '상품 srcset', { confidence: '중간' });
-      });
+      const best = largestSrcset(srcset);
+      if (best) push(best, '상품 srcset', { confidence: '높음' });
     });
     $$('[style*="background"]').slice(0, 50).forEach(node => {
       const bg = getComputedStyle(node).backgroundImage || '';
@@ -1004,7 +1035,46 @@
     return `${host}-${base}`.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 70) + `.${ext}`;
   }
 
+  function rememberCapture(items) {
+    const rec = {
+      page: location.href,
+      title: (document.title || '').slice(0, 80),
+      host: location.hostname.replace(/^www\./, ''),
+      ts: Date.now(),
+      items: (items || []).slice(0, 12).map(item => ({
+        url: item.url, type: item.type, name: item.name || fileName(item.url)
+      }))
+    };
+    try {
+      chrome.storage.local.get('slHistory', data => {
+        const list = [rec, ...(data.slHistory || []).filter(row => row.page !== rec.page)].slice(0, 20);
+        chrome.storage.local.set({ slHistory: list });
+      });
+    } catch { /* ignore */ }
+  }
+
+  function zipItems(items, button) {
+    const payload = items.slice(0, 40).map((item, i) => ({
+      url: item.url,
+      code: item.type === 'svg' ? (item.code || '') : '',
+      name: `${String(i + 1).padStart(2, '0')}-${downloadName(item)}`
+    }));
+    if (button) { button.disabled = true; button.textContent = 'ZIP 만드는 중…'; }
+    chrome.runtime.sendMessage({
+      type: 'zipDownload',
+      items: payload,
+      filename: `source-lens/${location.hostname.replace(/^www\./, '')}-media.zip`
+    }, result => {
+      if (button) {
+        button.disabled = false;
+        button.textContent = result?.ok ? `ZIP ${result.count || payload.length}개` : (result?.error || 'ZIP 실패');
+        setTimeout(() => { button.textContent = 'ZIP 저장'; }, 1800);
+      }
+    });
+  }
+
   function saveItem(item) {
+
     if (item.type === 'svg' && item.code) {
       downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), downloadName(item));
       return;
@@ -1338,7 +1408,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.7.0</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.0</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -1457,6 +1527,12 @@
         copyAll.textContent = 'URL 모두 복사';
         copyAll.onclick = () => copy(list.map(item => item.url).filter(Boolean).join('\n'), copyAll);
         bar.append(saveAll, copyAll);
+        const zipBtn = document.createElement('button');
+        zipBtn.type = 'button';
+        zipBtn.className = 'sl-btn sl-btn-brand';
+        zipBtn.textContent = 'ZIP 저장';
+        zipBtn.onclick = () => zipItems(list, zipBtn);
+        bar.append(zipBtn);
         if (state.activeTab === 'image') {
           const large = document.createElement('button');
           large.type = 'button';
@@ -1563,6 +1639,7 @@
     state.picked = list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
 
     state.candidates = dedupe([...list, ...collectPageMedia(), ...(state.platformMedia || [])]);
+    rememberCapture(state.candidates);
     state.activeTab = clickedSvg ? 'svg' : clickedVideo ? 'video' : 'selected';
     if (window !== window.top) {
       try {

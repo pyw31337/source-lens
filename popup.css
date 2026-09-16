@@ -21,4 +21,10 @@ header button{margin-left:auto;border:0;background:transparent;font-size:21px;cu
 footer{display:flex;gap:7px;margin-top:10px}
 footer button{flex:1;border:0;border-radius:4px;padding:9px;background:#3ecf8e;color:#1c1c1c;cursor:pointer;font-weight:700}
 footer button+button{background:#242424;color:#ededed;border:1px solid #343434}
+#zip{background:#3ecf8e;color:#1c1c1c}
+.hist-title{margin:16px 0 6px;font-size:12px;font-weight:650;color:#8d8d8d}
+.hist{display:block;padding:8px;margin:6px 0;border:1px solid #343434;border-radius:6px;background:#242424;color:#ededed;text-decoration:none}
+.hist:hover{border-color:#3ecf8e}
+.hist b{display:block;font-size:12px;font-weight:600}
+.hist span{display:block;color:#8d8d8d;font-size:10px;margin-top:3px}
 #status{min-height:16px;text-align:center;color:#8d8d8d}
