@@ -858,47 +858,81 @@
       const layer = document.createElement('div');
       layer.className = 'sl-slice-editor';
       layer.innerHTML = `<div class="sl-slice-card"><button class="sl-slice-close" type="button">×</button>
-        <header class="sl-slice-header"><div><h3>이미지 분할 편집</h3><small>가로선을 추가하고 드래그하세요. 더블클릭하면 삭제됩니다.</small></div>
-        <div class="sl-slice-tools"><button class="sl-btn sl-slice-add" type="button">+ 가로선</button>
-        <button class="sl-btn sl-slice-auto" type="button">자동 구간</button>
-        <select class="sl-slice-format"><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WebP</option></select>
-        <button class="sl-btn sl-slice-export" type="button">분할 저장</button></div></header>
+        <header class="sl-slice-header"><div><h3>이미지 분할 편집</h3><small>가로선은 지금 보는 화면 가운데에 추가됩니다. 선을 드래그하거나 ×로 삭제하세요.</small></div>
+        <div class="sl-slice-tools">
+          <button class="sl-btn sl-slice-add" type="button">+ 가로선</button>
+          <button class="sl-btn sl-slice-del" type="button">선 삭제</button>
+          <button class="sl-btn sl-slice-clear" type="button">모두 지우기</button>
+          <button class="sl-btn sl-zoom-out" type="button">−</button>
+          <span class="sl-zoom-label">100%</span>
+          <button class="sl-btn sl-zoom-in" type="button">+</button>
+          <button class="sl-btn sl-zoom-fit" type="button">맞춤</button>
+          <select class="sl-slice-format"><option value="jpg">JPG</option><option value="png">PNG</option><option value="webp">WebP</option></select>
+          <button class="sl-btn sl-slice-export" type="button">분할 저장</button>
+        </div></header>
         <div class="sl-slice-viewport"><div class="sl-slice-stage"><img class="sl-slice-image" alt=""><div class="sl-slice-lines"></div></div></div>
         <footer class="sl-slice-footer"><span class="sl-slice-count"></span><span>${image.naturalWidth}×${image.naturalHeight}px</span></footer></div>`;
       const viewport = layer.querySelector('.sl-slice-viewport');
       const preview = layer.querySelector('.sl-slice-image');
       const linesEl = layer.querySelector('.sl-slice-lines');
       const countEl = layer.querySelector('.sl-slice-count');
+      const zoomLabel = layer.querySelector('.sl-zoom-label');
       const positions = [];
+      let selected = -1;
+      let zoom = 1;
       preview.src = sourceUrl;
+      const applyZoom = () => {
+        preview.style.maxWidth = 'none';
+        preview.style.width = `${Math.round(zoom * 100)}%`;
+        zoomLabel.textContent = `${Math.round(zoom * 100)}%`;
+      };
+      applyZoom();
       const close = () => { URL.revokeObjectURL(sourceUrl); layer.remove(); };
       layer.querySelector('.sl-slice-close').onclick = close;
       layer.onclick = ev => { if (ev.target === layer) close(); };
       const renderLines = () => {
         linesEl.textContent = '';
         positions.sort((a, b) => a - b);
+        if (selected >= positions.length) selected = positions.length - 1;
         positions.forEach((position, lineIndex) => {
-          const line = document.createElement('button');
-          line.type = 'button';
-          line.className = 'sl-slice-line';
+          const line = document.createElement('div');
+          line.className = `sl-slice-line${selected === lineIndex ? ' is-selected' : ''}`;
           line.style.top = `${position * 100}%`;
-          line.ondblclick = ev => { ev.preventDefault(); positions.splice(lineIndex, 1); renderLines(); };
+          const del = document.createElement('button');
+          del.type = 'button';
+          del.className = 'sl-slice-line-x';
+          del.textContent = '×';
+          del.title = '이 선 삭제';
+          del.onclick = ev => {
+            ev.stopPropagation();
+            positions.splice(lineIndex, 1);
+            selected = -1;
+            renderLines();
+          };
           let dragging = false;
           const move = ev => {
             if (!dragging) return;
             const rect = preview.getBoundingClientRect();
             positions[lineIndex] = Math.max(0.01, Math.min(0.99, (ev.clientY - rect.top) / rect.height));
-            renderLines();
+            line.style.top = `${positions[lineIndex] * 100}%`;
           };
           line.onpointerdown = ev => {
+            if (ev.target === del) return;
+            selected = lineIndex;
             dragging = true;
+            line.classList.add('is-selected');
             line.setPointerCapture?.(ev.pointerId);
             window.addEventListener('pointermove', move);
-            window.addEventListener('pointerup', () => { dragging = false; window.removeEventListener('pointermove', move); }, { once: true });
+            window.addEventListener('pointerup', () => {
+              dragging = false;
+              window.removeEventListener('pointermove', move);
+              renderLines();
+            }, { once: true });
           };
+          line.append(del);
           linesEl.append(line);
         });
-        countEl.textContent = `${positions.length + 1}개 이미지로 분할`;
+        countEl.textContent = positions.length ? `${positions.length + 1}개 이미지로 분할` : '가로선을 추가하세요';
       };
       layer.querySelector('.sl-slice-add').onclick = () => {
         const view = viewport.getBoundingClientRect();
@@ -907,16 +941,44 @@
         const visibleBottom = Math.min(view.bottom, stage.bottom);
         const y = (visibleTop + visibleBottom) / 2;
         const pos = (y - stage.top) / Math.max(1, stage.height);
-        if (positions.length < 40) positions.push(Math.max(0.01, Math.min(0.99, pos)));
-        renderLines();
-        const lineY = pos * preview.offsetHeight - viewport.clientHeight / 2;
-        viewport.scrollTop = Math.max(0, lineY);
-      };
-      layer.querySelector('.sl-slice-auto').onclick = () => {
-        const cuts = suggestSliceCuts(image);
-        positions.splice(0, positions.length, ...cuts);
+        if (positions.length < 40) {
+          positions.push(Math.max(0.01, Math.min(0.99, pos)));
+          selected = positions.length - 1;
+        }
         renderLines();
       };
+      layer.querySelector('.sl-slice-del').onclick = () => {
+        if (selected < 0 && positions.length) selected = positions.length - 1;
+        if (selected < 0) return;
+        positions.splice(selected, 1);
+        selected = Math.min(selected, positions.length - 1);
+        renderLines();
+      };
+      layer.querySelector('.sl-slice-clear').onclick = () => {
+        positions.splice(0, positions.length);
+        selected = -1;
+        renderLines();
+      };
+      const setZoom = next => {
+        zoom = Math.min(4, Math.max(0.25, Math.round(next * 20) / 20));
+        applyZoom();
+      };
+      layer.querySelector('.sl-zoom-in').onclick = () => setZoom(zoom + 0.25);
+      layer.querySelector('.sl-zoom-out').onclick = () => setZoom(zoom - 0.25);
+      layer.querySelector('.sl-zoom-fit').onclick = () => setZoom(1);
+      viewport.addEventListener('wheel', ev => {
+        if (!ev.ctrlKey && !ev.metaKey) return;
+        ev.preventDefault();
+        setZoom(zoom + (ev.deltaY > 0 ? -0.1 : 0.1));
+      }, { passive: false });
+      layer.addEventListener('keydown', ev => {
+        if (ev.key === 'Delete' || ev.key === 'Backspace') {
+          ev.preventDefault();
+          layer.querySelector('.sl-slice-del').click();
+        }
+      });
+      layer.tabIndex = 0;
+      layer.focus();
       layer.querySelector('.sl-slice-export').onclick = async ev => {
         const button = ev.currentTarget;
         button.disabled = true;
@@ -969,7 +1031,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.7</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.8</small></h2>
+
 
 
 
