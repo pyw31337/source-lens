@@ -1,3 +1,18 @@
+/* Domain profiles are deliberately data-driven. They add hints; they never bypass access controls. */
+globalThis.SOURCE_LENS_PROFILES = [
+  ['youtube.com','video','video,playlist,thumbnail'], ['youtu.be','video','video'], ['instagram.com','social','image,video,og'], ['facebook.com','social','image,video,og'], ['fb.watch','video','video'], ['tiktok.com','video','video,og'], ['x.com','social','image,video,og'], ['twitter.com','social','image,video,og'], ['reddit.com','social','image,video,og'], ['pinterest.com','image','image,og'], ['pinimg.com','image','image,cdn'], ['twitch.tv','video','video,stream'], ['vimeo.com','video','video,og'], ['dailymotion.com','video','video,og'], ['netflix.com','drm','manifest,drm'], ['disneyplus.com','drm','manifest,drm'], ['primevideo.com','drm','manifest,drm'], ['hulu.com','drm','manifest,drm'], ['linkedin.com','social','image,video,og'], ['threads.net','social','image,og'], ['snapchat.com','social','image,video'], ['tumblr.com','social','image,video,og'], ['flickr.com','image','image,original'], ['imgur.com','image','image,original'], ['unsplash.com','image','image,original'], ['pexels.com','image','image,original'], ['pixabay.com','image','image,original'], ['deviantart.com','image','image,original'], ['behance.net','image','image,original'], ['dribbble.com','image','image,original'], ['medium.com','news','image,og'], ['nytimes.com','news','image,og'], ['theguardian.com','news','image,og'], ['bbc.com','news','image,og'], ['naver.com','portal','image,video,og'], ['blog.naver.com','news','image,original'], ['cafe.naver.com','social','image,og'], ['daum.net','portal','image,video,og'], ['kakao.com','social','image,video'], ['google.com','portal','image,og'], ['drive.google.com','cloud','download,resource'], ['dropbox.com','cloud','download,resource'], ['onedrive.live.com','cloud','download,resource'], ['github.com','code','raw,download'], ['gitlab.com','code','raw,download'], ['gmarket.co.kr','commerce','image,original'], ['auction.co.kr','commerce','image,original'], ['amazon.com','commerce','image,original'], ['coupang.com','commerce','image,original'], ['11st.co.kr','commerce','image,original'], ['smartstore.naver.com','commerce','image,original'], ['shopping.naver.com','commerce','image,original'], ['brand.naver.com','commerce','image,original'], ['tmon.co.kr','commerce','image,original'], ['wemakeprice.com','commerce','image,original'], ['ssg.com','commerce','image,original'], ['lotteon.com','commerce','image,original'], ['ebay.com','commerce','image,original'], ['aliexpress.com','commerce','image,original'], ['shopify.com','commerce','image,original']
+].map(([domain, kind, hints]) => ({ domain, kind, hints: hints.split(',') }));
+
+globalThis.SOURCE_LENS_BRANDS = [
+  ['youtube.com','YouTube','#ff0000'],['youtu.be','YouTube','#ff0000'],['instagram.com','Instagram','#d62976'],['facebook.com','Facebook','#1877f2'],['tiktok.com','TikTok','#111827'],['x.com','X','#111827'],['twitter.com','Twitter','#1d9bf0'],['reddit.com','Reddit','#ff4500'],['pinterest.com','Pinterest','#e60023'],['twitch.tv','Twitch','#9146ff'],['vimeo.com','Vimeo','#1ab7ea'],['dailymotion.com','Dailymotion','#00aaff'],['netflix.com','Netflix','#e50914'],['linkedin.com','LinkedIn','#0a66c2'],['unsplash.com','Unsplash','#111827'],['pexels.com','Pexels','#05a081'],['pixabay.com','Pixabay','#2ec66d'],['behance.net','Behance','#1769ff'],['dribbble.com','Dribbble','#ea4c89'],['naver.com','네이버','#03c75a'],['blog.naver.com','네이버 블로그','#03c75a'],['daum.net','다음','#00a88f'],['kakao.com','카카오','#fee500'],['gmarket.co.kr','Gmarket','#00d094'],['auction.co.kr','옥션','#ff5000'],['coupang.com','쿠팡','#e31837'],['danawa.com','다나와','#1d4ed8'],['enuri.com','에누리','#00a0e9'],['lucide.dev','Lucide','#f56565'],['tabler.io','Tabler','#066fd1']
+].map(([domain, name, color]) => ({ domain, name, color }));
+
+globalThis.sourceLensProfileFor = function(host) {
+  host = (host || '').toLowerCase().replace(/^www\./, '');
+  const profile = SOURCE_LENS_PROFILES.find(p => host === p.domain || host.endsWith('.' + p.domain)) || { domain: host, kind: 'generic', hints: [] };
+  const brand = SOURCE_LENS_BRANDS.find(b => host === b.domain || host.endsWith('.' + b.domain));
+  return { ...profile, brand: brand || { name: host || '웹사이트', color: '#64748b' } };
+};
 
 globalThis.SOURCE_LENS_KIND = {
   icons: { svgMin: 8, skipChrome: false, wantSvg: true, extra: true },
@@ -56,7 +71,9 @@ globalThis.SOURCE_LENS_SITES = [
 globalThis.sourceLensSite = function (host) {
   host = (host || '').toLowerCase().replace(/^www\./, '').replace(/^m\./, '');
   const hit = SOURCE_LENS_SITES.find(s => host === s.host || host.endsWith('.' + s.host));
-  const profile = sourceLensProfileFor(host);
+  const profile = typeof sourceLensProfileFor === 'function'
+    ? sourceLensProfileFor(host)
+    : { kind: 'generic', brand: { name: host || '웹사이트', color: '#64748b' } };
   const kind = hit?.kind || (profile.kind === 'commerce' ? 'commerce' : profile.kind === 'image' ? 'stock' : profile.kind) || 'generic';
   const defaults = SOURCE_LENS_KIND[kind] || SOURCE_LENS_KIND.generic;
   return { host, kind, ...defaults, brand: profile.brand };

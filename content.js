@@ -1173,7 +1173,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.5.2</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.5.3</small></h2>
+
 
 
 
