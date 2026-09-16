@@ -406,12 +406,26 @@
     return node;
   }
 
+  function bytesToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
+    return btoa(binary);
+  }
+
+  function blobFromBase64(base64, mime) {
+    const bin = atob(base64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    return new Blob([bytes], { type: mime || 'application/octet-stream' });
+  }
+
   function fetchBytes(url) {
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'fetchResource', url }, result => {
         if (chrome.runtime.lastError || result?.error) return reject(new Error(result?.error || chrome.runtime.lastError.message));
+        if (result?.base64) return resolve(blobFromBase64(result.base64, result.mime));
         if (result?.buffer) return resolve(new Blob([result.buffer], { type: result.mime || 'application/octet-stream' }));
-        if (result?.blob) return resolve(result.blob);
         reject(new Error('empty'));
       });
     });
@@ -420,8 +434,8 @@
   function downloadBlob(blob, name) {
     blob.arrayBuffer().then(buffer => {
       chrome.runtime.sendMessage({
-        type: 'downloadBuffer',
-        buffer,
+        type: 'downloadBase64',
+        base64: bytesToBase64(buffer),
         mime: blob.type || 'application/octet-stream',
         filename: `source-lens/${name}`
       }, () => void chrome.runtime.lastError);
@@ -430,7 +444,9 @@
       const a = document.createElement('a');
       a.href = url;
       a.download = name;
+      (state.shadow || document.documentElement).append(a);
       a.click();
+      a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 2000);
     });
   }
@@ -501,28 +517,42 @@
   function convertImage(item, format, button) {
     const prev = button?.textContent;
     if (button) button.textContent = '변환 중…';
-    imageBlob(item).then(blob => new Promise((resolve, reject) => {
-      const src = URL.createObjectURL(blob);
+    const name = `${(fileName(item.url) || 'image').replace(/\.[^.]+$/, '')}.${format.ext}`;
+    const done = (ok, err) => {
+      if (button) button.textContent = ok ? '저장됨' : '변환 실패';
+      if (!ok) console.warn('[Source Lens] convert', err);
+      setTimeout(() => { if (button) button.textContent = prev; }, 1800);
+    };
+    if (item.type === 'svg' && item.code) {
       const image = new Image();
       image.onload = () => {
         const canvas = document.createElement('canvas');
-        canvas.width = image.naturalWidth;
-        canvas.height = image.naturalHeight;
-        canvas.getContext('2d').drawImage(image, 0, 0);
-        canvas.toBlob(out => {
-          URL.revokeObjectURL(src);
-          out ? resolve(out) : reject(new Error('toBlob'));
+        canvas.width = Math.max(1, image.naturalWidth);
+        canvas.height = Math.max(1, image.naturalHeight);
+        const ctx = canvas.getContext('2d');
+        if (format.mime === 'image/jpeg') {
+          ctx.fillStyle = '#fff';
+          ctx.fillRect(0, 0, canvas.width, canvas.height);
+        }
+        ctx.drawImage(image, 0, 0);
+        canvas.toBlob(blob => {
+          if (!blob) return done(false, 'toBlob');
+          downloadBlob(blob, name);
+          done(true);
         }, format.mime, 0.92);
       };
-      image.onerror = () => { URL.revokeObjectURL(src); reject(new Error('decode')); };
-      image.src = src;
-    })).then(blob => {
-      downloadBlob(blob, `${fileName(item.url).replace(/\.[^.]+$/, '') || 'image'}.${format.ext}`);
-      if (button) button.textContent = '저장됨';
-      setTimeout(() => { if (button) button.textContent = prev; }, 1200);
-    }).catch(() => {
-      if (button) button.textContent = '변환 실패';
-      setTimeout(() => { if (button) button.textContent = prev; }, 1600);
+      image.onerror = () => done(false, 'svg decode');
+      image.src = `data:image/svg+xml;charset=utf-8,${encodeURIComponent(item.code)}`;
+      return;
+    }
+    chrome.runtime.sendMessage({
+      type: 'convertAndDownload',
+      url: item.url,
+      mime: format.mime,
+      filename: `source-lens/${name}`
+    }, result => {
+      if (chrome.runtime.lastError) return done(false, chrome.runtime.lastError.message);
+      done(!!result?.ok, result?.error);
     });
   }
 
@@ -583,12 +613,16 @@
 
   async function openSliceEditor(item) {
     let blob;
-    try { blob = await imageBlob(item); } catch {
+    try {
+      blob = item.type === 'svg' && item.code
+        ? new Blob([item.code], { type: 'image/svg+xml' })
+        : await imageBlob(item);
+    } catch (error) {
       const note = document.createElement('div');
-      note.className = 'sl-session-note';
-      note.textContent = '이미지를 불러오지 못해 분할할 수 없습니다.';
-      uiRoot().querySelector('#sl-panel')?.append(note);
-      setTimeout(() => note.remove(), 2500);
+      note.className = 'sl-lightbox';
+      note.innerHTML = `<div class="sl-lightbox-card"><p class="sl-session-note">이미지를 불러오지 못해 분할할 수 없습니다. ${esc(String(error.message || error))}</p><button class="sl-btn" type="button">닫기</button></div>`;
+      note.querySelector('button').onclick = () => note.remove();
+      uiRoot().append(note);
       return;
     }
 
@@ -701,7 +735,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.3</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.4</small></h2>
+
 
 
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>

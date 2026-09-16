@@ -1,11 +1,25 @@
 {
   "manifest_version": 3,
   "name": "Source Lens",
-  "version": "0.4.3",
+  "version": "0.4.4",
   "description": "페이지에서 이미지·영상·SVG의 실제 리소스 URL을 찾고, 만료·세션 제약을 설명한 뒤 저장합니다.",
-  "permissions": ["contextMenus", "webRequest", "storage", "scripting", "downloads", "activeTab"],
+  "permissions": [
+    "contextMenus",
+    "webRequest",
+    "storage",
+    "scripting",
+    "downloads",
+    "activeTab",
+    "declarativeNetRequest",
+    "declarativeNetRequestWithHostAccess"
+  ],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "service-worker.js" },
+  "declarative_net_request": {
+    "rule_resources": [
+      { "id": "referer", "enabled": true, "path": "dnr.json" }
+    ]
+  },
   "action": {
     "default_title": "Source Lens",
     "default_popup": "popup.html",
