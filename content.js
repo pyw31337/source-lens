@@ -88,12 +88,18 @@
   }
 
   function candidate(url, source, hint, extra = {}) {
-    const value = abs(url);
+    let value = abs(url);
     if (!value) return null;
+    if (typeof SL.unwrapMediaUrl === 'function') value = abs(SL.unwrapMediaUrl(value)) || value;
     if (SL.isUiJunk(value) && hint !== 'svg') return null;
+    if (hint !== 'svg' && hint !== 'video' && typeof SL.upgradeMediaUrl === 'function') {
+      const upgraded = SL.upgradeMediaUrl(value);
+      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded))) value = upgraded;
+    }
     const info = SL.classifyUrl(value, hint);
     if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
     if (info.type === 'video' && SL.isImageUrl(value)) info.type = 'image';
+    if (info.type === 'video' && /i\.ytimg|maxresdefault|hqdefault|mqdefault/i.test(value)) info.type = 'image';
     return {
       url: value, source, ...info,
       confidence: extra.confidence || '중간',
@@ -106,7 +112,6 @@
       name: extra.name || '',
       fp: extra.fp || '',
       relation: extra.relation || 'target'
-
     };
   }
 
@@ -444,6 +449,7 @@
   }
 
   function collectPageSvgs() {
+    if (['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'video'].includes(siteKind())) return [];
     const social = ['instagram', 'facebook', 'youtube', 'social', 'video'].includes(siteKind());
     const min = siteProfile().svgMin || (social ? 36 : 12);
     const out = [];
@@ -1167,7 +1173,8 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.5.1</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.5.2</small></h2>
+
 
 
 

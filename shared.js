@@ -39,6 +39,30 @@
     return `${n >= 10 || i === 0 ? n.toFixed(0) : n.toFixed(1)} ${units[i]}`;
   };
 
+  SL.unwrapMediaUrl = function unwrapMediaUrl(url) {
+    if (!url || typeof url !== 'string') return url;
+    let current = url.trim();
+    for (let i = 0; i < 4; i++) {
+      try {
+        const u = new URL(current, typeof location !== 'undefined' ? location.href : 'https://example.com/');
+        let inner = '';
+        for (const key of ['url', 'fname', 'src', 'image', 'image_url', 'img', 'file', 'q']) {
+          const v = u.searchParams.get(key);
+          if (v && /^https?:/i.test(v)) { inner = v; break; }
+        }
+        if (!inner) {
+          const embedded = current.match(/\/optimize\/[^/\s]+\/(https?:\/\/\S+)/i);
+          if (embedded) inner = embedded[1];
+        }
+        if (!inner || inner === current) break;
+        current = inner;
+      } catch {
+        break;
+      }
+    }
+    return current;
+  };
+
   SL.upgradeMediaUrl = function upgradeMediaUrl(url) {
     if (!url || typeof url !== 'string') return url;
     try {
@@ -100,7 +124,9 @@
     if (!url) return true;
     if (/^data:image\/svg/i.test(url)) return false;
     if (/rsrc\.php|static\.(?:xx\.)?fbcdn|static\.cdninstagram|instagram\.com\/static|facebook\.com\/rsrc/i.test(url)) return true;
-    if (/\/(?:emoticon|emoji|nickcon|wcmt_emot)\//i.test(url)) return true;
+    if (/facebook\.com\/tr\?|\/tr\?id=|google-analytics|googletagmanager|doubleclick|scorecardresearch|adservice/i.test(url)) return true;
+    if (/nolmg_|noimg|no_image|spacer|pixel\.gif|1x1|clear\.gif/i.test(url)) return true;
+    if (/\/(?:emoticon|emoji|nickcon|wcmt_emot|dccon)\//i.test(url)) return true;
     if (/\.(?:gif|ico)(?:$|[?#])/i.test(url)) return true;
     if (/\.svg(?:$|[?#])/i.test(url) && /(?:cdninstagram|fbcdn|instagram\.com|facebook\.com)/i.test(url)) return true;
     return false;
@@ -113,7 +139,10 @@
     if (SL.PHOTO_EXT.test(url)) return true;
     if (/_(?:n|o)\.(?:jpe?g|png|webp)/i.test(url)) return true;
     if (/[?&]stp=/i.test(url) && !SL.MEDIA_EXT.test(url)) return true;
-    if (/i\.ytimg\.com|ggpht\.com|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|mir-s3-cdn-cf\.behance/i.test(url)) return true;
+    if (/i\.ytimg\.com|ggpht\.com|images\.unsplash|images\.pexels|cdn\.pixabay|cdn\.dribbble|mir-s3-cdn-cf\.behance|i\.vimeocdn/i.test(url)) return true;
+    if (/img\.danawa\.com|img\.enuri\.info|image\.ygosu\.com|file\.ygosu\.com|humoruniv\.com|dcimg\d*\.dcinside|viewimage\.php|namu\.la/i.test(url)) return true;
+    if (/pstatic\.net/i.test(url) && /(?:type=w\d+|phinf|blogfiles|imgnews|shop-phinf|img)/i.test(url) && !/\.(?:js|css)(?:$|[?#])/i.test(url)) return true;
+    if (/t\d\.kakaocdn\.net|kakaocdn\.net\/thumb/i.test(url) && !/\.(?:js|css|mp4)/i.test(url)) return true;
     return false;
   };
 
@@ -123,7 +152,8 @@
     if (SL.isImageUrl(url, mime) || SL.PHOTO_EXT.test(url) || /_n\.(?:jpe?g|png|webp)/i.test(url)) return false;
     if (SL.MEDIA_EXT.test(url)) return true;
     if (/googlevideo\.com|videoplayback/i.test(url)) return true;
-    if (/vimeocdn\.com|player\.vimeo\.com|vod-progressive|akamaized\.net\/.*\.(?:mp4|m3u8)/i.test(url)) return true;
+    if (/player\.vimeo\.com|vod-progressive|vimeocdn\.com\/.*(?:mp4|m3u8)/i.test(url)) return true;
+
     if (/tiktokcdn|muscdn\.com|bytevod|tiktok\.com\/aweme/i.test(url)) return true;
     if (/\.pstatic\.net\/.*(mp4|hls)|tvnaver|kakaocdn\.net.*(?:mp4|m3u8)|daumcdn\.net.*(?:mp4|m3u8)/i.test(url)) return true;
     if (/\/o1\/v\//i.test(url)) return true;
