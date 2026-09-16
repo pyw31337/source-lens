@@ -264,27 +264,31 @@
     try {
       const doc = new DOMParser().parseFromString(sanitized, 'image/svg+xml');
       const root = doc.documentElement;
+      if (!root || root.tagName.toLowerCase() !== 'svg') return sanitized;
       root.setAttribute('color', '#111111');
-      if (!root.getAttribute('stroke') && !root.getAttribute('fill')) {
-        root.setAttribute('fill', 'none');
-        root.setAttribute('stroke', '#111111');
-        if (!root.getAttribute('stroke-width')) root.setAttribute('stroke-width', '1.8');
-        root.setAttribute('stroke-linecap', 'round');
-        root.setAttribute('stroke-linejoin', 'round');
-      }
-      root.querySelectorAll('*').forEach(el => {
+      const w = parseFloat(root.getAttribute('width')) || 24;
+      const h = parseFloat(root.getAttribute('height')) || 24;
+      if (!root.getAttribute('viewBox')) root.setAttribute('viewBox', `0 0 ${w} ${h}`);
+      root.removeAttribute('width');
+      root.removeAttribute('height');
+      root.setAttribute('preserveAspectRatio', 'xMidYMid meet');
+      const paint = (el) => {
+        if (!el.getAttribute) return;
         ['fill', 'stroke'].forEach(attr => {
-          const v = el.getAttribute(attr);
-          if (v && v !== 'none' && !/^url\(/i.test(v) && isLightPaint(v)) el.setAttribute(attr, '#111111');
+          const v = (el.getAttribute(attr) || '').trim();
+          if (!v || v === 'currentColor' || isLightPaint(v)) el.setAttribute(attr, v === 'none' ? 'none' : '#111111');
         });
         const style = el.getAttribute('style');
         if (style) {
           el.setAttribute('style', style
-            .replace(/fill\s*:\s*(?!none)(?!url)[^;]+/ig, m => /none/i.test(m) ? m : 'fill:#111111')
-            .replace(/stroke\s*:\s*(?!none)(?!url)[^;]+/ig, m => /none/i.test(m) ? m : 'stroke:#111111')
+            .replace(/fill\s*:\s*(currentColor|[^;]+)/ig, (m, v) => /none/i.test(v) ? m : 'fill:#111111')
+            .replace(/stroke\s*:\s*(currentColor|[^;]+)/ig, (m, v) => /none/i.test(v) ? m : 'stroke:#111111')
             .replace(/color\s*:\s*[^;]+/ig, 'color:#111111'));
         }
-      });
+      };
+      paint(root);
+      root.querySelectorAll('*').forEach(paint);
+      if (!root.getAttribute('fill') && !root.getAttribute('stroke')) root.setAttribute('fill', '#111111');
       return new XMLSerializer().serializeToString(root);
     } catch {
       return sanitized;
@@ -453,16 +457,34 @@
     return false;
   }
 
+  function expandSvgUses(svg) {
+    try {
+      const clone = svg.cloneNode(true);
+      clone.querySelectorAll('use').forEach(use => {
+        const href = use.getAttribute('href') || use.getAttribute('xlink:href') || '';
+        if (!href.startsWith('#')) return;
+        const src = document.getElementById(href.slice(1));
+        if (!src) return;
+        const inner = src.cloneNode(true);
+        if (inner.tagName.toLowerCase() === 'symbol' || inner.tagName.toLowerCase() === 'svg') {
+          use.replaceWith(...[...inner.childNodes].map(n => n.cloneNode(true)));
+        } else use.replaceWith(inner);
+      });
+      return clone;
+    } catch {
+      return svg;
+    }
+  }
+
   function svgCandidate(svg, source, confidence, extra = {}) {
     if (!svg || svg.closest?.('#sl-host')) return null;
     const r = svg.getBoundingClientRect();
     if (r.width < 8 || r.height < 8) return null;
-    const social = ['instagram', 'facebook', 'youtube'].includes(siteKind());
-    if (social && Math.max(r.width, r.height) < 36) return null;
     if (!extra.keepUi && isUiSvg(svg, extra.url, svgName(svg))) return null;
-    const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
+    const expanded = expandSvgUses(svg);
+    const code = sanitizeSvg(new XMLSerializer().serializeToString(expanded));
     const name = svgName(svg);
-    const fp = svgFingerprint(svg, code);
+    const fp = svgFingerprint(expanded, code);
     return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, source, 'svg', {
       element: svg, code, confidence, relation: extra.relation || 'page', name,
       width: Math.round(r.width), height: Math.round(r.height), fp
@@ -470,7 +492,7 @@
   }
 
   function collectInlineSvg(target) {
-    const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg');
+    const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg') || target?.querySelector?.('svg');
     const out = [];
     if (clicked) {
       const item = svgCandidate(clicked, 'inline SVG', '최상', { keepUi: true, relation: 'target' });
@@ -480,15 +502,17 @@
   }
 
   function collectPageSvgs() {
-    if (['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'video'].includes(siteKind())) return [];
-    const social = ['instagram', 'facebook', 'youtube', 'social', 'video'].includes(siteKind());
-    const min = siteProfile().svgMin || (social ? 36 : 12);
+    const social = ['youtube', 'vimeo', 'instagram', 'facebook', 'tiktok', 'video'].includes(siteKind());
+    const min = siteProfile().svgMin || 12;
     const out = [];
     const seen = new Set();
     $$('svg').forEach(svg => {
       const r = svg.getBoundingClientRect();
       if (Math.min(r.width, r.height) < min) return;
-      const item = svgCandidate(svg, '페이지 SVG', '중간');
+      if (social && !svg.closest('article, main, [role="main"], [role="dialog"]') && !svg.closest('#sl-host')) {
+        if (!svg.getAttribute('aria-label') && Math.max(r.width, r.height) < 40) return;
+      }
+      const item = svgCandidate(svg, '페이지 SVG', '중간', { keepUi: social });
       if (!item) return;
       const key = item.fp || item.url;
       if (seen.has(key)) return;
@@ -799,11 +823,17 @@
   }
 
   function mediaNode(item, className) {
-    if (item.type === 'svg' && item.code) {
+    if (item.type === 'svg' || /\.svg(?:$|[?#])/i.test(item.url || '') || /^data:image\/svg/i.test(item.url || '')) {
       const holder = document.createElement('div');
       holder.className = `sl-svg-media ${className || ''}`;
-      holder.innerHTML = previewSvg(item.code);
-
+      const code = item.code || svgSource(item);
+      if (code) holder.innerHTML = previewSvg(code);
+      else if (item.url) {
+        const img = document.createElement('img');
+        img.alt = item.name || 'svg';
+        img.src = item.url;
+        holder.append(img);
+      }
       return holder;
     }
     if (!item.url || (/^data:/i.test(item.url) && item.type !== 'svg')) return null;
@@ -1424,7 +1454,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.8.2</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.8.3</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
