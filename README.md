@@ -2,19 +2,13 @@
 
 Chromium(Chrome, Whale, Edge, Brave, Vivaldi)용 미디어 소스 인스펙터입니다.
 
-## 다운로드
-
-- 확장앱 zip: https://github.com/pyw31337/source-lens/releases/latest
-- 또는 이 저장소 **Code → Download ZIP**
-
 ## 설치
 
-1. zip 압축을 풉니다.
-2. 기존 Source Lens를 삭제합니다.
-3. `whale://extensions` 또는 `chrome://extensions`에서 개발자 모드를 켭니다.
-4. **압축해제된 확장앱 설치**로 `source-lens` 폴더를 선택합니다.
-5. 인스타그램 등 대상 페이지를 완전 새로고침합니다.
-6. 패널 제목 옆 `0.4.0`이 보이면 새 빌드입니다.
+1. 기존 Source Lens를 삭제합니다.
+2. `whale://extensions` 또는 `chrome://extensions`에서 개발자 모드를 켭니다.
+3. **압축해제된 확장앱 설치**로 `source-lens` 폴더를 선택합니다.
+4. 인스타그램 등 대상 페이지를 완전 새로고침합니다.
+5. 패널 제목 옆 `0.4.0`이 보이면 새 빌드입니다.
 
 ## 사용
 

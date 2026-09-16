@@ -42,19 +42,58 @@
     };
   }
 
+  function uiRoot() {
+    if (state.shadow) return state.shadow;
+    const host = document.createElement('div');
+    host.id = 'sl-host';
+    host.style.cssText = 'all:initial;position:fixed;inset:0;z-index:2147483647;pointer-events:none;';
+    const shadow = host.attachShadow({ mode: 'open' });
+    const link = document.createElement('link');
+    link.rel = 'stylesheet';
+    link.href = chrome.runtime.getURL('content.css');
+    const extra = document.createElement('style');
+    extra.textContent = `
+      :host, #sl-root { all: initial; font-family: Inter, ui-sans-serif, system-ui, sans-serif; }
+      #sl-root { pointer-events: none; position: fixed; inset: 0; }
+      #sl-panel, .sl-lightbox, .sl-slice-editor { pointer-events: auto; }
+      button, select { font: inherit; color: inherit; }
+    `;
+    shadow.append(link, extra);
+    document.documentElement.append(host);
+    state.host = host;
+    state.shadow = shadow;
+    return shadow;
+  }
+
   function mediaAtPoint(x, y) {
-    const stack = document.elementsFromPoint(x, y);
+    const stack = document.elementsFromPoint(x, y).filter(node => node !== state.host && !node.closest?.('#sl-host'));
+    const found = [];
     for (const node of stack) {
-      if (node.closest?.('#sl-root, .sl-lightbox, .sl-slice-editor')) continue;
       const media = node.tagName && /^(IMG|VIDEO|SVG|PICTURE)$/.test(node.tagName)
         ? node
         : node.closest?.('img, video, svg, picture');
-      if (!media) continue;
+      if (!media || found.includes(media)) continue;
       const r = media.getBoundingClientRect();
-      if (r.width < 32 || r.height < 32) continue;
-      return media;
+      if (media.tagName !== 'SVG' && (r.width < 40 || r.height < 40)) continue;
+      found.push(media);
     }
-    return stack[0] || document.body;
+    const img = found.find(n => n.tagName === 'IMG' || n.tagName === 'PICTURE');
+    const video = found.find(n => n.tagName === 'VIDEO');
+    const svg = found.find(n => n.tagName === 'SVG');
+    if (svg && !img && !video) return svg;
+    if (img && video) {
+      if (!video.paused && video.readyState >= 2 && video.videoWidth > 0) return video;
+      return img;
+    }
+    return found[0] || stack[0] || document.body;
+  }
+
+  function pathKey(url) {
+    try {
+      return new URL(url, location.href).pathname.replace(/\/+$/, '').split('/').pop() || url;
+    } catch {
+      return url;
+    }
   }
 
   function sanitizeSvg(code) {
@@ -111,13 +150,36 @@
     if (state.pageNet.length > 80) state.pageNet.splice(0, state.pageNet.length - 80);
   });
 
-  function collectRecentVideos() {
-    const cutoff = Date.now() - 20000;
-    return state.pageNet
-      .filter(item => item.t >= cutoff && SL.isVideoUrl(item.url) && !SL.isImageUrl(item.url))
-      .slice(-12)
-      .map(item => candidate(item.url, '최근 네트워크 영상', 'video', { confidence: '높음', relation: 'network' }))
-      .filter(Boolean);
+  function collectRecentVideos(clicked) {
+    const clickedSrc = abs(clicked?.currentSrc || clicked?.src || '');
+    const cutoff = Date.now() - 8000;
+    const map = new Map();
+    state.pageNet.filter(item => item.t >= cutoff && SL.isVideoUrl(item.url) && !SL.isImageUrl(item.url)).forEach(item => {
+      const key = pathKey(item.url);
+      if (!map.has(key)) map.set(key, candidate(item.url, '최근 네트워크 영상', 'video', { confidence: '높음', relation: 'network' }));
+    });
+    let out = [...map.values()].filter(Boolean);
+    if (clickedSrc && !/^blob:/i.test(clickedSrc)) {
+      out = out.filter(item => pathKey(item.url) === pathKey(clickedSrc) || item.url === clickedSrc);
+    }
+    return out.slice(0, 4);
+  }
+
+  function collectInlineSvg(target) {
+    const clicked = target?.tagName === 'SVG' ? target : target?.closest?.('svg');
+    const root = target?.closest?.('article') || target;
+    const nodes = new Set();
+    if (clicked) nodes.add(clicked);
+    root?.querySelectorAll?.('svg')?.forEach(svg => {
+      const r = svg.getBoundingClientRect();
+      if (r.width >= 48 && r.height >= 48 && !svg.closest('nav, footer, [role="navigation"]')) nodes.add(svg);
+    });
+    return [...nodes].map(svg => {
+      const code = sanitizeSvg(new XMLSerializer().serializeToString(svg));
+      return candidate(`data:image/svg+xml;charset=utf-8,${encodeURIComponent(code)}`, 'inline SVG', 'svg', {
+        element: svg, code, confidence: svg === clicked ? '최상' : '중간'
+      });
+    }).filter(Boolean);
   }
 
   function collectYouTube(target) {
@@ -140,25 +202,7 @@
   }
 
   function collectNetwork() {
-    const perf = performance.getEntriesByType('resource')
-      .filter(entry => SL.isVideoUrl(entry.name) && !SL.isImageUrl(entry.name))
-      .slice(-40)
-      .map(entry => candidate(entry.name, '브라우저 네트워크', 'video', { confidence: '높음', relation: 'network' }))
-      .filter(Boolean);
-    return new Promise(resolve => {
-      try {
-        chrome.runtime.sendMessage({ type: 'recentRequests' }, result => {
-          const req = (result?.requests || [])
-            .filter(item => SL.isVideoUrl(item.url) && !SL.isImageUrl(item.url))
-            .slice(-40)
-            .map(item => candidate(item.url, '확장 네트워크', 'video', { confidence: '높음', relation: 'network' }))
-            .filter(Boolean);
-          resolve([...perf, ...req]);
-        });
-      } catch {
-        resolve(perf);
-      }
-    });
+    return Promise.resolve([]);
   }
 
   function listPageMedia() {
@@ -212,7 +256,7 @@
   }
 
   function closePanel() {
-    state.panel?.remove();
+    state.shadow?.querySelectorAll?.('#sl-root, .sl-lightbox, .sl-slice-editor')?.forEach(n => n.remove());
     state.panel = null;
     state.selected?.classList?.remove('sl-select');
   }
@@ -227,9 +271,9 @@
     if (!item.url || (/^data:/i.test(item.url) && item.type !== 'svg')) return null;
     const urlLooksImage = SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url) || /^image\//i.test(item.mime || '');
     if (item.type === 'video' && !urlLooksImage) {
-      const poster = state.selectedMedia?.poster
-        || state.selected?.closest?.('article')?.querySelector?.('img')?.currentSrc
-        || '';
+      const poster = item.element === state.selectedMedia
+        ? (state.selectedMedia?.poster || '')
+        : '';
       if (item.temporary || /^blob:/i.test(item.url)) {
         const img = document.createElement('img');
         img.className = className || '';
@@ -242,6 +286,7 @@
       node.controls = true;
       node.muted = true;
       node.playsInline = true;
+      node.preload = 'metadata';
       if (poster) node.poster = poster;
       node.src = item.url;
       return node;
@@ -257,6 +302,7 @@
     return new Promise((resolve, reject) => {
       chrome.runtime.sendMessage({ type: 'fetchResource', url }, result => {
         if (chrome.runtime.lastError || result?.error) return reject(new Error(result?.error || chrome.runtime.lastError.message));
+        if (result?.buffer) return resolve(new Blob([result.buffer], { type: result.mime || 'application/octet-stream' }));
         if (result?.blob) return resolve(result.blob);
         reject(new Error('empty'));
       });
@@ -264,27 +310,38 @@
   }
 
   function downloadBlob(blob, name) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = name;
-    a.click();
-    setTimeout(() => URL.revokeObjectURL(url), 2000);
+    blob.arrayBuffer().then(buffer => {
+      chrome.runtime.sendMessage({
+        type: 'downloadBuffer',
+        buffer,
+        mime: blob.type || 'application/octet-stream',
+        filename: `source-lens/${name}`
+      }, () => void chrome.runtime.lastError);
+    }).catch(() => {
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = name;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 2000);
+    });
   }
 
   function saveItem(item) {
     if (item.type === 'svg' && item.code) {
-      downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), `${fileName(item.url)}.svg`);
+      downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), `${fileName(item.url) || 'image'}.svg`);
       return;
     }
-    const fallback = () => {
-      if (item.temporary && state.postUrl) window.open(state.postUrl, '_blank', 'noopener');
-      else window.open(item.url, '_blank', 'noopener');
-    };
-    fetchBytes(item.url).then(blob => {
-      const ext = item.type === 'video' ? 'mp4' : (fileName(item.url).split('.').pop() || 'jpg');
-      downloadBlob(blob, fileName(item.url).includes('.') ? fileName(item.url) : `${fileName(item.url)}.${ext}`);
-    }).catch(fallback);
+    const name = fileName(item.url) || (item.type === 'video' ? 'video.mp4' : 'image.jpg');
+    if (/^https?:/i.test(item.url) && !item.temporary) {
+      chrome.runtime.sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${name}` }, result => {
+        if (!result?.ok) fetchBytes(item.url).then(blob => downloadBlob(blob, name));
+      });
+      return;
+    }
+    fetchBytes(item.url).then(blob => downloadBlob(blob, name)).catch(() => {
+      if (state.postUrl) window.open(state.postUrl, '_blank', 'noopener');
+    });
   }
 
   function copy(value, button) {
@@ -334,6 +391,8 @@
   }
 
   function convertImage(item, format, button) {
+    const prev = button?.textContent;
+    if (button) button.textContent = '변환 중…';
     imageBlob(item).then(blob => new Promise((resolve, reject) => {
       const src = URL.createObjectURL(blob);
       const image = new Image();
@@ -342,14 +401,20 @@
         canvas.width = image.naturalWidth;
         canvas.height = image.naturalHeight;
         canvas.getContext('2d').drawImage(image, 0, 0);
-        canvas.toBlob(out => out ? resolve(out) : reject(), format.mime, 0.92);
+        canvas.toBlob(out => {
+          URL.revokeObjectURL(src);
+          out ? resolve(out) : reject(new Error('toBlob'));
+        }, format.mime, 0.92);
       };
-      image.onerror = reject;
+      image.onerror = () => { URL.revokeObjectURL(src); reject(new Error('decode')); };
       image.src = src;
     })).then(blob => {
-      downloadBlob(blob, `${fileName(item.url).replace(/\.[^.]+$/, '')}.${format.ext}`);
+      downloadBlob(blob, `${fileName(item.url).replace(/\.[^.]+$/, '') || 'image'}.${format.ext}`);
+      if (button) button.textContent = '저장됨';
+      setTimeout(() => { if (button) button.textContent = prev; }, 1200);
     }).catch(() => {
       if (button) button.textContent = '변환 실패';
+      setTimeout(() => { if (button) button.textContent = prev; }, 1600);
     });
   }
 
@@ -381,32 +446,41 @@
     page.textContent = `${index + 1} / ${items.length}`;
     const actions = document.createElement('div');
     actions.className = 'sl-lightbox-actions';
-    actions.innerHTML = `<button class="sl-btn sl-copy">URL 복사</button><button class="sl-btn sl-save">저장</button>`;
-    actions.querySelector('.sl-copy').onclick = ev => copy(item.temporary ? state.postUrl : item.url, ev.currentTarget);
-    actions.querySelector('.sl-save').onclick = () => saveItem(item);
+    const addBtn = (label, className, onClick) => {
+      const btn = document.createElement('button');
+      btn.type = 'button';
+      btn.className = className;
+      btn.textContent = label;
+      btn.onclick = onClick;
+      actions.append(btn);
+      return btn;
+    };
+    addBtn('URL 복사', 'sl-btn sl-copy', ev => copy(item.temporary ? (state.postUrl || item.url) : item.url, ev.currentTarget));
+    addBtn('저장', 'sl-btn sl-save', () => saveItem(item));
+    addBtn('새 탭', 'sl-btn', () => window.open(item.temporary ? (state.postUrl || item.url) : item.url, '_blank', 'noopener'));
     if (item.type === 'image') {
       [['JPG', 'jpg', 'image/jpeg'], ['PNG', 'png', 'image/png'], ['WebP', 'webp', 'image/webp']].forEach(([label, ext, mime]) => {
-        const btn = document.createElement('button');
-        btn.className = 'sl-btn';
-        btn.textContent = `${label} 저장`;
-        btn.onclick = () => convertImage(item, { label, ext, mime }, btn);
-        actions.append(btn);
+        addBtn(`${label} 저장`, 'sl-btn', ev => convertImage(item, { label, ext, mime }, ev.currentTarget));
       });
-      const slice = document.createElement('button');
-      slice.className = 'sl-btn';
-      slice.textContent = '분할 편집';
-      slice.onclick = () => { layer.remove(); openSliceEditor(item); };
-      actions.append(slice);
+      addBtn('분할 편집', 'sl-btn', () => { layer.remove(); openSliceEditor(item); });
     }
     card.append(title, page, actions);
     layer.append(card);
     layer.onclick = ev => { if (ev.target === layer) layer.remove(); };
-    document.documentElement.append(layer);
+    uiRoot().append(layer);
   }
 
   async function openSliceEditor(item) {
     let blob;
-    try { blob = await imageBlob(item); } catch { alert('이미지를 불러오지 못했습니다.'); return; }
+    try { blob = await imageBlob(item); } catch {
+      const note = document.createElement('div');
+      note.className = 'sl-session-note';
+      note.textContent = '이미지를 불러오지 못해 분할할 수 없습니다.';
+      uiRoot().querySelector('#sl-panel')?.append(note);
+      setTimeout(() => note.remove(), 2500);
+      return;
+    }
+
     const sourceUrl = URL.createObjectURL(blob);
     const image = new Image();
     image.onload = () => {
@@ -485,21 +559,30 @@
         button.textContent = '저장 완료';
         button.disabled = false;
       };
-      document.documentElement.append(layer);
+      uiRoot().append(layer);
       renderLines();
+    };
+    image.onerror = () => {
+      URL.revokeObjectURL(sourceUrl);
+      const note = document.createElement('div');
+      note.className = 'sl-session-note';
+      note.textContent = '이미지를 불러오지 못해 분할할 수 없습니다.';
+      uiRoot().querySelector('#sl-panel')?.append(note);
+      setTimeout(() => note.remove(), 2500);
     };
     image.src = sourceUrl;
   }
 
   function render() {
     closePanel();
+    const shadow = uiRoot();
     const root = document.createElement('div');
     root.id = 'sl-root';
     const panel = document.createElement('section');
     panel.id = 'sl-panel';
     root.append(panel);
     state.panel = root;
-    document.documentElement.append(root);
+    shadow.append(root);
     const brand = (typeof sourceLensProfileFor === 'function' ? sourceLensProfileFor(location.hostname) : null)?.brand
       || { name: siteKind(), color: '#229968' };
     const selected = state.candidates[0];
@@ -507,7 +590,7 @@
       <button class="sl-close" type="button" aria-label="닫기">×</button>
       <header class="sl-header">
         <div>
-          <h2>Source Lens <small class="sl-ver">0.4.0</small></h2>
+          <h2>Source Lens <small class="sl-ver">0.4.1</small></h2>
           <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
         </div>
       </header>
@@ -546,6 +629,12 @@
             <button class="sl-btn sl-save">저장</button>
           </div>`;
         $('.sl-url', card).onclick = ev => {
+          const existing = card.querySelector('.sl-url-value');
+          if (existing) {
+            existing.remove();
+            ev.currentTarget.textContent = 'URL 보기';
+            return;
+          }
           const code = document.createElement('code');
           code.className = 'sl-url-value';
           code.textContent = item.temporary ? (state.postUrl || item.url) : item.url;
@@ -600,21 +689,27 @@
     state.selectedMedia = clickedVideo ? collected.media : null;
     state.postUrl = postUrl(target);
     const extras = [];
-    if (clickedVideo) {
-      extras.push(...collectRecentVideos());
-      extras.push(...(await collectNetwork()));
-    }
+    if (clickedVideo) extras.push(...collectRecentVideos(collected.media));
+    extras.push(...collectInlineSvg(target));
     if (siteKind() === 'youtube') extras.push(...collectYouTube(target));
     if (!clickedSvg) extras.push(...collectArticle(target));
+    const seenVideo = new Set();
     let list = rank(dedupe([...seed, ...collected.candidates, ...extras]), collected.media)
       .filter(item => item && !SL.isUiJunk(item.url));
     if (clickedSvg) list = list.filter(item => item.type === 'svg');
     else if (clickedVideo) {
-      const videos = list.filter(item => item.type === 'video' && (item.temporary || SL.isVideoUrl(item.url)));
-      const poster = list.filter(item => item.type === 'image' && SL.isImageUrl(item.url));
-      list = [...videos, ...poster.slice(0, 4)];
+      const videos = list.filter(item => {
+        if (item.type !== 'video' || !(item.temporary || SL.isVideoUrl(item.url))) return false;
+        const key = pathKey(item.url);
+        if (seenVideo.has(key)) return false;
+        seenVideo.add(key);
+        return true;
+      }).slice(0, 5);
+      const poster = list.filter(item => item.type === 'image' && SL.isImageUrl(item.url)).slice(0, 2);
+      const svgs = list.filter(item => item.type === 'svg');
+      list = [...videos, ...poster, ...svgs];
     } else {
-      list = list.filter(item => item.type === 'image' && SL.isImageUrl(item.url));
+      list = list.filter(item => (item.type === 'image' && SL.isImageUrl(item.url)) || item.type === 'svg');
     }
     state.candidates = list;
     if (window !== window.top) {
@@ -637,14 +732,14 @@
   }
 
   window.addEventListener('mousedown', ev => {
-    if (ev.altKey && ev.button === 0 && !ev.target.closest?.('#sl-root, .sl-lightbox, .sl-slice-editor')) {
+    if (ev.altKey && ev.button === 0 && ev.target !== state.host && !ev.target.closest?.('#sl-host')) {
       ev.preventDefault();
       ev.stopImmediatePropagation();
     }
   }, true);
 
   window.addEventListener('click', ev => {
-    if (!ev.altKey || ev.button !== 0 || ev.target.closest?.('#sl-root, .sl-lightbox, .sl-slice-editor')) return;
+    if (!ev.altKey || ev.button !== 0 || ev.target === state.host || ev.target.closest?.('#sl-host')) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
     inspect(mediaAtPoint(ev.clientX, ev.clientY));
