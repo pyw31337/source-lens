@@ -3,8 +3,9 @@
    2) Reads platform JSON (Instagram, Facebook, generic JSON-LD) and groups video URLs per video.
    3) Notices DRM (Encrypted Media Extensions) so the extension can say "protected" instead of failing silently. */
 (() => {
-  if (window.__sourceLensMain) return;
-  window.__sourceLensMain = true;
+  // Versioned guard: a page that still has the 1.0 hooks (opened before the update) also gets the 1.1 video hooks.
+  if (window.__sourceLensMain === '1.1') return;
+  window.__sourceLensMain = '1.1';
   const root = document.documentElement;
   const fire = (name, detail) => { try { root.dispatchEvent(new CustomEvent(name, { detail })); } catch { /* ignore */ } };
 

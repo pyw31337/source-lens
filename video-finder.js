@@ -2,10 +2,11 @@
    Turns everything we know about the page's videos into a ranked list of saveable items:
    kind = direct (a real file), dash / hls (stream we can download + merge), record (only by recording), drm (protected). */
 (() => {
-  if (window.__slVideo) return;
+  const aliveNow = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch { return false; } };
+  if (window.__slVideo && window.__slVideo.alive?.()) return;
   const SL = globalThis.SourceLens;
   const MT = globalThis.SourceLensMedia;
-  const V = window.__slVideo = {};
+  const V = window.__slVideo = { alive: aliveNow };
   const root = document.documentElement;
   const st = { groups: [], net: new Map(), drm: '', probes: new Map(), probing: new Set(), sw: [], swAt: 0, listeners: new Set(), mpdCache: new Map() };
   const changed = () => { clearTimeout(changed.t); changed.t = setTimeout(() => st.listeners.forEach(fn => { try { fn(); } catch { /* ignore */ } }), 150); };

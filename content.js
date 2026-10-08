@@ -1,6 +1,10 @@
 (() => {
-  if (window.__sourceLensLoaded) return;
+  // A copy left behind by an extension update/reload is "dead" (its chrome.* link is gone) but its listeners stay
+  // in the tab. Only skip when the existing copy is alive; otherwise start fresh so Alt(⌥)+click keeps working.
+  if (window.__sourceLensLoaded && typeof window.__sourceLensAlive === 'function' && window.__sourceLensAlive()) return;
   window.__sourceLensLoaded = true;
+  const alive = () => { try { return !!(chrome.runtime && chrome.runtime.id); } catch { return false; } };
+  window.__sourceLensAlive = alive;
 
   const SL = globalThis.SourceLens;
   const VF = window.__slVideo;
@@ -247,6 +251,10 @@
     };
   }
 
+  function removeStaleHosts(keep) {
+    document.querySelectorAll('#sl-host').forEach(h => { if (h !== (keep || state.host)) h.remove(); });
+  }
+
   function uiRoot() {
     if (state.shadow) return state.shadow;
     const host = document.createElement('div');
@@ -268,6 +276,7 @@
       #sl-panel, .sl-lightbox, .sl-slice-editor { pointer-events: auto; }
     `;
     shadow.append(link, extra);
+    removeStaleHosts(host);
     document.documentElement.append(host);
     state.host = host;
     state.shadow = shadow;
@@ -2430,7 +2439,9 @@
 
   const fromOurUi = ev => ev.target === state.host || !!ev.target?.closest?.('#sl-host');
 
+  let altHandledAt = 0;
   window.addEventListener('mousedown', ev => {
+    if (!alive()) return; // stale copy after an update: let the live copy handle it
     if (!state.altClick) return;
     if (ev.altKey && ev.button === 0 && !fromOurUi(ev)) {
       ev.preventDefault();
@@ -2438,9 +2449,9 @@
     }
   }, true);
 
-  function clickTarget(ev) {
+  function clickTarget(ev, deepNode) {
     // Media inside open shadow DOM is invisible to elementsFromPoint; use the real event path.
-    const deep = ev.composedPath?.()[0];
+    const deep = deepNode || ev.composedPath?.()[0];
     if (deep && deep.nodeType === 1 && deep.getRootNode?.() !== document) {
       const media = deep.closest?.('img,video,svg,picture');
       if (media) return media;
@@ -2449,11 +2460,27 @@
   }
 
   window.addEventListener('click', ev => {
+    if (!alive()) return;
     if (!state.altClick) return;
     if (!ev.altKey || ev.button !== 0 || fromOurUi(ev)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
+    altHandledAt = Date.now();
     inspect(clickTarget(ev));
+  }, true);
+
+  // Safety net: an old copy still sitting in a tab that was open during an update can swallow the click
+  // before this copy sees it. If our click handler did not run, open the panel from here instead.
+  window.addEventListener('pointerup', ev => {
+    if (!alive() || !state.altClick || !ev.altKey || ev.button !== 0 || fromOurUi(ev)) return;
+    const at = Date.now();
+    const point = { clientX: ev.clientX, clientY: ev.clientY };
+    const deep = ev.composedPath?.()[0];
+    setTimeout(() => {
+      if (altHandledAt >= at) return;
+      removeStaleHosts();
+      inspect(clickTarget(point, deep));
+    }, 350);
   }, true);
 
   window.addEventListener('mousemove', ev => {
