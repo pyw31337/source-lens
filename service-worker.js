@@ -1,3 +1,5 @@
+try { importScripts('media-tools.js'); } catch (e) { console.warn('media-tools', e); }
+const MT = globalThis.SourceLensMedia;
 const requestsByTab = new Map();
 const MAX = 400;
 
@@ -165,6 +167,32 @@ async function downloadBase64(mime, base64, filename) {
   });
 }
 
+function watchDownload(id, timeout) {
+  return new Promise(resolve => {
+    let settled = false;
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      chrome.downloads.onChanged.removeListener(onChanged);
+      clearTimeout(timer);
+      clearInterval(poll);
+      resolve({ id, ...result });
+    };
+    const check = item => {
+      if (!item) return;
+      if (item.state === 'interrupted' || item.error) finish({ ok: false, error: item.error || 'interrupted' });
+      else if (item.state === 'complete' || item.bytesReceived > 0) finish({ ok: true });
+    };
+    const onChanged = delta => {
+      if (delta.id !== id) return;
+      chrome.downloads.search({ id }, items => check(items?.[0]));
+    };
+    chrome.downloads.onChanged.addListener(onChanged);
+    const poll = setInterval(() => chrome.downloads.search({ id }, items => check(items?.[0])), 400);
+    const timer = setTimeout(() => finish({ ok: true, pending: true }), timeout);
+  });
+}
+
 async function convertBuffer(buffer, mime, outMime) {
   const blob = new Blob([buffer], { type: mime || 'image/jpeg' });
   const bitmap = await createImageBitmap(blob);
@@ -190,9 +218,106 @@ if (chrome.webRequest?.onBeforeRequest) {
   }, { urls: ['<all_urls>'], types: ['image', 'media', 'xmlhttprequest', 'other'] });
 }
 
-chrome.tabs.onRemoved.addListener(tabId => requestsByTab.delete(tabId));
+chrome.tabs.onRemoved.addListener(tabId => { requestsByTab.delete(tabId); forgetTabMedia(tabId); });
+
+// ---------------------------------------------------------------- per-tab video sources (survive SW restarts)
+const MEDIA_NOISE = /googlevideo\.com|\/videoplayback|bytestart=|byteend=|[?&]range=|\.m4s(?:$|[?#])|\.ts(?:$|[?#])|\.aac(?:$|[?#])|\.m4a(?:$|[?#])|fbcdn\.net|cdninstagram\.com|init\.mp4/i;
+const tabMediaCache = new Map();
+function mediaKey(tabId) { return `tm:${tabId}`; }
+async function getTabMedia(tabId) {
+  if (tabMediaCache.has(tabId)) return tabMediaCache.get(tabId);
+  let list = [];
+  try { list = (await chrome.storage.session.get(mediaKey(tabId)))[mediaKey(tabId)] || []; } catch { /* ignore */ }
+  tabMediaCache.set(tabId, list);
+  return list;
+}
+async function addTabMedia(tabId, entry) {
+  const list = await getTabMedia(tabId);
+  if (list.some(x => x.url === entry.url)) return;
+  list.push(entry);
+  if (list.length > 40) list.splice(0, list.length - 40);
+  try { await chrome.storage.session.set({ [mediaKey(tabId)]: list }); } catch { /* ignore */ }
+}
+function forgetTabMedia(tabId) {
+  tabMediaCache.delete(tabId);
+  try { chrome.storage.session.remove(mediaKey(tabId)); } catch { /* ignore */ }
+}
+chrome.tabs.onUpdated.addListener((tabId, info) => {
+  if (info.status === 'loading' && info.url) forgetTabMedia(tabId);
+});
+if (chrome.webRequest?.onHeadersReceived) {
+  chrome.webRequest.onHeadersReceived.addListener(details => {
+    if (details.tabId < 0 || details.statusCode >= 400 || !/^https?:/i.test(details.url)) return;
+    if (details.initiator && details.initiator.startsWith('chrome-extension://')) return;
+    const header = name => (details.responseHeaders || []).find(h => h.name.toLowerCase() === name)?.value || '';
+    const ct = header('content-type').toLowerCase();
+    const url = details.url;
+    let manifest = '';
+    if (/mpegurl/.test(ct) || /\.m3u8(?:$|[?#])/i.test(url)) manifest = 'hls';
+    else if (/dash\+xml/.test(ct) || /\.mpd(?:$|[?#])/i.test(url)) manifest = 'dash';
+    if (manifest) {
+      if (/googlevideo\.com/.test(url)) return;
+      addTabMedia(details.tabId, { url, manifest, t: Date.now(), frameId: details.frameId });
+      return;
+    }
+    if (!/^video\//.test(ct) || MEDIA_NOISE.test(url) || details.statusCode === 206 && !header('content-range')) return;
+    const range = /\/(\d+)\s*$/.exec(header('content-range'));
+    const size = range ? Number(range[1]) : Number(header('content-length')) || 0;
+    if (size && size < 200_000) return;
+    addTabMedia(details.tabId, { url, manifest: '', mime: ct.split(';')[0], size, t: Date.now(), frameId: details.frameId });
+  }, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other'] }, ['responseHeaders']);
+}
+
+async function fetchText(url) {
+  const errors = [];
+  for (const credentials of ['omit', 'include']) {
+    try {
+      const res = await fetch(url, { credentials, redirect: 'follow', cache: 'no-store' });
+      if (!res.ok) { errors.push(res.status); continue; }
+      return { text: await res.text(), url: res.url || url };
+    } catch (e) { errors.push(String(e)); }
+  }
+  throw new Error(`매니페스트를 받지 못했습니다 (${errors.join(', ')})`);
+}
+
+async function openJob(job, opener) {
+  const id = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 7)}`;
+  await chrome.storage.session.set({ [`job:${id}`]: { ...job, created: Date.now() } });
+  const opts = { url: chrome.runtime.getURL(`downloader.html#${id}`), active: true };
+  if (opener?.id) { opts.index = opener.index + 1; opts.openerTabId = opener.id; opts.windowId = opener.windowId; }
+  const tab = await chrome.tabs.create(opts);
+  return { ok: true, id, tabId: tab.id };
+}
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message?.type === 'tabMedia') {
+    const tabId = message.tabId || sender.tab?.id;
+    getTabMedia(tabId).then(items => sendResponse({ items })).catch(() => sendResponse({ items: [] }));
+    return true;
+  }
+  if (message?.type === 'probeManifest') {
+    (async () => {
+      try {
+        const { text, url } = await fetchText(message.url);
+        sendResponse({ ...MT.summarize(text, url), url: message.url });
+      } catch (error) {
+        sendResponse({ error: String(error.message || error) });
+      }
+    })();
+    return true;
+  }
+  if (message?.type === 'mediaJob') {
+    (async () => {
+      try {
+        let opener = sender.tab;
+        if (!opener && message.tabId) opener = await chrome.tabs.get(message.tabId).catch(() => null);
+        sendResponse(await openJob(message.job || {}, opener));
+      } catch (error) {
+        sendResponse({ ok: false, error: String(error.message || error) });
+      }
+    })();
+    return true;
+  }
   if (message?.type === 'recentRequests') {
     sendResponse({ requests: (requestsByTab.get(sender.tab?.id) || []).slice(-200) });
     return true;
@@ -289,7 +414,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         filename,
         saveAs: false,
         conflictAction: 'uniquify'
-      }, () => sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message || '' }));
+      }, id => {
+        if (chrome.runtime.lastError || id == null) {
+          const err = chrome.runtime.lastError?.message || 'download failed';
+          if (/filename/i.test(err)) {
+            const ext = (/\.([a-z0-9]{2,5})$/i.exec(filename) || [0, 'bin'])[1];
+            const safe = filename.replace(/[^/]+$/, `media-${Date.now()}.${ext}`);
+            chrome.downloads.download({ url: message.url, filename: safe, saveAs: false, conflictAction: 'uniquify' }, id2 => {
+              if (chrome.runtime.lastError || id2 == null) sendResponse({ ok: false, error: chrome.runtime.lastError?.message || err });
+              else watchDownload(id2, 7000).then(sendResponse);
+            });
+            return;
+          }
+          sendResponse({ ok: false, error: err });
+          return;
+        }
+        // Wait until the server actually starts sending (or refuses), so a 403 is reported instead of a fake success.
+        watchDownload(id, 7000).then(sendResponse);
+      });
     })();
     return true;
   }
@@ -313,9 +455,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 function injectContent(tabId, frameIds) {
   const target = frameIds ? { tabId, frameIds } : { tabId };
   return new Promise(resolve => {
-    chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' }, () => {
+    chrome.scripting.executeScript({ target, files: ['inject-main.js', 'shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' }, () => {
       void chrome.runtime.lastError;
-      chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'content.js'] }, () => {
+      chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'media-tools.js', 'video-finder.js', 'content.js'] }, () => {
         resolve(!chrome.runtime.lastError);
       });
     });

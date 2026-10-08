@@ -41,8 +41,8 @@ async function collect(tab) {
   if (run.error && !run.results.length) throw new Error(run.error);
   if (!run.results.some(r => r && r.result)) {
     // Tab was opened before the extension was (re)loaded: inject the scripts now.
-    await exec(tab.id, { files: ['shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' });
-    await exec(tab.id, { files: ['shared.js', 'platform-profiles.js', 'content.js'] });
+    await exec(tab.id, { files: ['inject-main.js', 'shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' });
+    await exec(tab.id, { files: ['shared.js', 'platform-profiles.js', 'media-tools.js', 'video-finder.js', 'content.js'] });
     await new Promise(r => setTimeout(r, 250));
     run = await exec(tab.id, { func: listInFrame });
   }
@@ -54,7 +54,10 @@ async function collect(tab) {
     if (!res) return;
     if (res.top) videoLocked = !!res.videoLocked;
     ['images', 'videos', 'svgs'].forEach(kind => (res[kind] || []).forEach(item => {
-      const key = `${kind}:${item.type === 'svg' && item.code ? item.code.slice(0, 400) : item.url}`;
+      if (kind === 'videos') item = { ...item, frameId: r.frameId };
+      const key = kind === 'videos'
+        ? `v:${item.kind}:${item.url || (item.job && (item.job.url || (item.job.xml || '').slice(0, 300))) || `${r.frameId}:${item.vid}`}`
+        : `${kind}:${item.type === 'svg' && item.code ? item.code.slice(0, 400) : item.url}`;
       if (seen.has(key)) return;
       seen.add(key);
       merged[kind].push({ ...item, frame: res.top ? 'top' : 'frame' });
@@ -71,7 +74,7 @@ function visible() {
   if (q) {
     const words = q.split(/\s+/);
     list = list.filter(i => {
-      const hay = `${i.name || ''} ${/^data:/i.test(i.url) ? '' : i.url} ${i.source || ''}`.toLowerCase();
+      const hay = `${i.name || ''} ${/^data:/i.test(i.url || '') ? '' : i.url} ${i.source || ''} ${i.note || ''} ${i.quality || ''}`.toLowerCase();
       return words.every(w => hay.includes(w));
     });
   }
@@ -79,6 +82,7 @@ function visible() {
 }
 
 function keyOf(item) {
+  if (item.kind) return `v:${item.kind}:${item.url || item.job?.url || item.quality}:${item.frameId}:${item.vid}`;
   return `${item.type}:${item.type === 'svg' && item.code ? item.code.slice(0, 400) : item.url}`;
 }
 
@@ -94,6 +98,7 @@ function updateFooter() {
   const n = chosen || list.length;
   $('#download').textContent = `저장 (${n})`;
   $('#zip').textContent = `ZIP (${Math.min(n, 40)})`;
+  $('#zip').hidden = state.view === 'videos';
   $('#copy').textContent = state.view === 'svgs' ? `코드 복사 (${n})` : `URL 복사 (${n})`;
   ['#download', '#zip', '#copy'].forEach(sel => { $(sel).disabled = !list.length; });
   const all = $('#selectAll');
@@ -105,9 +110,7 @@ function updateFooter() {
 function emptyMessage() {
   if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다.`;
   if (state.view === 'videos') {
-    return state.videoLocked
-      ? '이 사이트(인스타·페북·틱톡)는 영상 원본 주소를 확장에서 받을 수 없습니다.'
-      : '찾은 영상이 없습니다. 영상을 한 번 재생한 뒤 ↻ 를 눌러 보세요.';
+    return '찾은 영상이 없습니다. 영상을 한 번 재생한 뒤(인스타·페북은 영상을 화면에 띄운 뒤) ↻ 를 눌러 보세요.';
   }
   if (state.view === 'images' && state.minPx && (state.data.images || []).length) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
   if (state.view === 'svgs') return '찾은 SVG가 없습니다.';
@@ -142,7 +145,7 @@ function render() {
   const listEl = $('#list');
   listEl.textContent = '';
   ['images', 'videos', 'svgs'].forEach(kind => {
-    $(`#n-${kind}`).textContent = kind === 'videos' && state.videoLocked && !state.data.videos.length ? '불가' : state.data[kind].length;
+    $(`#n-${kind}`).textContent = kind === 'videos' ? state.data.videos.filter(v => v.kind !== 'drm').length : state.data[kind].length;
   });
   document.querySelectorAll('.tabs button').forEach(b => b.classList.toggle('active', b.dataset.tab === state.view));
   $('#minPx').hidden = state.view !== 'images';
@@ -152,6 +155,16 @@ function render() {
     empty.className = 'empty';
     empty.textContent = emptyMessage();
     listEl.append(empty);
+    updateFooter();
+    return;
+  }
+  listEl.classList.toggle('vlist', state.view === 'videos');
+  if (state.view === 'videos') {
+    const help = document.createElement('p');
+    help.className = 'vhelp';
+    help.textContent = '위에서부터 추천 순서입니다. 원본 파일 → 스트림 합치기(DASH/HLS) → 녹화 순으로 좋아요.';
+    listEl.append(help);
+    list.forEach(item => listEl.append(videoRow(item)));
     updateFooter();
     return;
   }
@@ -199,6 +212,85 @@ function render() {
   updateFooter();
 }
 
+const fmtClock = s => { s = Math.max(0, Math.floor(s || 0)); return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`; };
+const BTN = { direct: '저장', dash: 'MP4로 받기', hls: 'MP4로 받기', record: '녹화 저장', drm: '저장 불가' };
+
+function videoRow(item) {
+  const key = keyOf(item);
+  const row = document.createElement('div');
+  row.className = `vrow k-${item.kind}${item.playing ? ' playing' : ''}${state.selected.has(key) ? ' checked' : ''}`;
+  const box = document.createElement('input');
+  box.type = 'checkbox';
+  box.className = 'check';
+  box.checked = state.selected.has(key);
+  box.setAttribute('aria-label', '선택');
+  box.onclick = ev => {
+    ev.stopPropagation();
+    if (box.checked) state.selected.add(key); else state.selected.delete(key);
+    row.classList.toggle('checked', box.checked);
+    updateFooter();
+  };
+  const head = document.createElement('div');
+  head.className = 'vhead';
+  const badge = document.createElement('span');
+  badge.className = `vbadge k-${item.kind}`;
+  badge.textContent = item.badge || item.kind;
+  const facts = document.createElement('b');
+  facts.textContent = [item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : '', item.frameId ? '프레임' : ''].filter(Boolean).join(' · ') || item.source || '';
+  head.append(box, badge, facts);
+  const note = document.createElement('p');
+  note.className = 'vnote';
+  note.textContent = item.note || '';
+  const actions = document.createElement('div');
+  actions.className = 'actions';
+  const main = document.createElement('button');
+  main.type = 'button';
+  main.className = 'brand';
+  main.textContent = BTN[item.kind] || '저장';
+  main.disabled = item.kind === 'drm';
+  main.onclick = () => saveVideo(item, main);
+  actions.append(main);
+  if (item.url) {
+    const c = document.createElement('button');
+    c.type = 'button';
+    c.textContent = '주소 복사';
+    c.onclick = () => copyText(item.url, c);
+    actions.append(c);
+  }
+  row.append(head, note, actions);
+  return row;
+}
+
+async function saveVideo(item, button) {
+  const tab = state.tab || await activeTab();
+  if (item.kind === 'drm') { setStatus(item.note, 'error'); return { ok: false }; }
+  if (item.kind === 'direct') {
+    if (button) button.textContent = '확인 중…';
+    const res = await sendMessage({ type: 'downloadUrl', url: item.url, filename: `source-lens/${item.file || 'video.mp4'}` });
+    if (button) button.textContent = res.ok ? '저장됨 ✓' : '실패';
+    setStatus(res.ok ? `원본 영상 저장을 시작했습니다 · ${item.file || ''}` : `원본 주소가 거절됐습니다 (${res.error || ''}). 페이지를 새로고침하거나 아래 다른 방법을 써 보세요.`, res.ok ? '' : 'error');
+    return res;
+  }
+  if (item.kind === 'dash' || item.kind === 'hls') {
+    const host = state.host.replace(/^www\./, '');
+    const res = await sendMessage({ type: 'mediaJob', tabId: tab?.id, job: { ...item.job, file: item.file, title: item.title, host, quality: 0 } });
+    setStatus(res.ok ? '새 탭에서 받아 하나의 MP4로 합칩니다.' : `시작하지 못했습니다: ${res.error || ''}`, res.ok ? '' : 'error');
+    return res;
+  }
+  // record: runs inside the page so it keeps going after this popup closes
+  return new Promise(resolve => {
+    api.tabs.sendMessage(tab.id, { type: 'recordVideo', vid: item.vid }, { frameId: item.frameId || 0 }, result => {
+      void api.runtime.lastError;
+      result = result || {};
+      if (result.ok) {
+        setStatus(result.mode === 'live' ? '라이브 녹화 중 · 페이지 아래 「지금 저장」을 누르면 저장됩니다.' : '녹화를 시작했습니다. 영상이 끝나면 자동 저장됩니다. 탭을 열어 두세요.');
+        setTimeout(() => window.close(), 1500);
+      } else setStatus(result.error || '녹화를 시작하지 못했습니다.', 'error');
+      resolve(result);
+    });
+  });
+}
+
 async function copyText(text, button) {
   try {
     await navigator.clipboard.writeText(text);
@@ -219,6 +311,19 @@ function sendMessage(msg) {
 
 async function saveItems(items) {
   let ok = 0, fail = 0, skipped = 0;
+  if (items.some(i => i.kind)) {
+    const runnable = items.filter(i => i.kind === 'direct' || i.kind === 'dash' || i.kind === 'hls');
+    for (const item of runnable.slice(0, 10)) {
+      const r = await saveVideo(item);
+      if (r && r.ok) ok += 1; else fail += 1;
+    }
+    skipped = items.length - runnable.length;
+    const parts = [`${ok}개 영상 저장을 시작했습니다`];
+    if (fail) parts.push(`${fail}개 실패`);
+    if (skipped) parts.push(`녹화·DRM 항목 ${skipped}개는 각 줄의 버튼을 쓰세요`);
+    setStatus(parts.join(' · '), fail && !ok ? 'error' : '');
+    return;
+  }
   for (const item of items) {
     if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url))) { skipped += 1; continue; }
     if (item.stream) { skipped += 1; continue; }
@@ -295,7 +400,7 @@ $('#copy').onclick = () => {
     if (!codes.length) return setStatus('복사할 SVG 코드가 없습니다.', 'error');
     return copyText(codes.join('\n\n'));
   }
-  const urls = list.map(i => i.url).filter(u => !/^data:/i.test(u));
+  const urls = list.map(i => i.url).filter(u => u && !/^data:/i.test(u));
   if (!urls.length) return setStatus('복사할 URL이 없습니다.', 'error');
   copyText(urls.join('\n')).then(() => setStatus(`${urls.length}개 URL을 복사했습니다.`));
 };
@@ -345,6 +450,9 @@ $('#oneClickVideo').onclick = async () => {
     void api.runtime.lastError;
     result = result || {};
     if (result.ok && result.mode === 'file') setStatus('원본 영상 파일 저장을 시작했습니다.');
+    else if (result.ok && result.mode === 'stream') setStatus('새 탭에서 영상을 받아 하나의 MP4로 합칩니다.');
+    else if (result.mode === 'drm') setStatus(result.error || 'DRM 보호 영상이라 저장할 수 없습니다.', 'error');
+    else if (result.ok && result.mode === 'stop') setStatus('녹화를 멈추고 저장합니다.');
     else if (result.ok && result.mode === 'blob') setStatus('영상을 저장했습니다.');
     else if (result.ok && result.mode === 'live') setStatus('라이브 녹화 중입니다. 페이지 아래 초록 바를 누르면 저장됩니다.');
     else if (result.ok && result.mode === 'image') setStatus('영상이 아니라 이미지라서 이미지로 저장했습니다.');

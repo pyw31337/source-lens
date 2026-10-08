@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ko">
+<meta charset="utf-8">
+<title>Source Lens · 영상 저장</title>
+<link rel="stylesheet" href="downloader.css">
+<main>
+  <header>
+    <img src="icon-48.png" width="36" height="36" alt="">
+    <div>
+      <h1>영상 저장</h1>
+      <p id="from">준비 중…</p>
+    </div>
+  </header>
+  <section class="card">
+    <h2 id="title">영상</h2>
+    <p id="kind" class="muted"></p>
+    <label id="qualityRow" hidden>화질
+      <select id="quality"></select>
+    </label>
+    <div class="bar"><i id="bar"></i></div>
+    <p id="status" role="status">매니페스트를 읽는 중…</p>
+    <p id="detail" class="muted"></p>
+    <div class="actions">
+      <button id="cancel" type="button">취소</button>
+      <button id="restart" type="button" hidden>선택한 화질로 다시 받기</button>
+      <button id="show" type="button" class="brand" hidden>저장된 파일 보기</button>
+    </div>
+  </section>
+  <p class="tips">이 탭은 저장이 끝날 때까지 열어 두세요. 다른 탭을 봐도 괜찮습니다.<br>
+  DRM(Widevine 등)으로 보호된 영상은 저장하지 않습니다.</p>
+</main>
+<script src="media-tools.js"></script>
+<script src="downloader.js"></script>
+</html>
