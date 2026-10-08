@@ -339,7 +339,25 @@ function sendToTab(tabId, payload, frameId) {
   });
 }
 
-chrome.runtime.onInstalled.addListener(() => {
+// After install/update, tabs that were already open still run the old (disconnected) copy, so Alt(⌥)+click
+// silently did nothing until the tab was refreshed. Put the new copy into every open tab right away.
+async function injectIntoOpenTabs() {
+  let tabs = [];
+  try { tabs = await chrome.tabs.query({ url: ['http://*/*', 'https://*/*'] }); } catch { return; }
+  for (const tab of tabs) {
+    if (tab.discarded || !tab.id) continue;
+    const target = { tabId: tab.id, allFrames: true };
+    try {
+      await chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' });
+    } catch { /* restricted page */ }
+    try {
+      await chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'content.js'] });
+    } catch { /* restricted page */ }
+  }
+}
+
+chrome.runtime.onInstalled.addListener(details => {
+  if (details?.reason === 'install' || details?.reason === 'update') injectIntoOpenTabs();
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
