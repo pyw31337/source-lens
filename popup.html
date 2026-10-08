@@ -1,29 +1,63 @@
 <!doctype html>
+<html lang="ko">
 <meta charset="utf-8">
 <title>Source Lens</title>
 <link rel="stylesheet" href="popup.css">
 <main>
   <header>
-    <img src="icon-48.png" width="34" height="34" alt="">
-    <div>
-      <h1>Source Lens <small>0.9.0</small></h1>
+    <img src="icon-48.png" width="30" height="30" alt="">
+    <div class="title">
+      <h1>Source Lens <small id="ver"></small></h1>
       <p id="pageHost">현재 페이지</p>
     </div>
-    <button id="refresh" title="새로고침">↻</button>
+    <button id="refresh" class="icon" type="button" title="다시 찾기">↻</button>
+    <button id="settings" class="icon" type="button" title="설정">⚙</button>
   </header>
-  <button id="oneClickVideo" type="button">영상 원클릭 저장</button>
-  <div class="toolbar">
-    <span id="count">불러오는 중…</span>
-    <label><input id="selectAll" type="checkbox"> 전체</label>
+
+  <div class="primary">
+    <button id="openPanel" type="button" class="brand" title="페이지 위에 큰 패널을 엽니다">
+      페이지에서 크게 보기 <kbd id="panelKey">Alt+Shift+D</kbd>
+    </button>
+    <button id="oneClickVideo" type="button" title="재생 중인 영상을 원본 파일로 저장하거나, 막혀 있으면 끝까지 녹화합니다">영상 저장</button>
   </div>
-  <section id="list"></section>
+
+  <nav class="tabs" role="tablist">
+    <button data-tab="images" class="active" type="button">이미지 <b id="n-images">0</b></button>
+    <button data-tab="videos" type="button">영상 <b id="n-videos">0</b></button>
+    <button data-tab="svgs" type="button">SVG <b id="n-svgs">0</b></button>
+  </nav>
+
+  <div class="filters">
+    <input id="search" type="search" placeholder="검색: 파일명·주소  ( / )" autocomplete="off">
+    <select id="minPx" title="작은 썸네일·아이콘 숨기기">
+      <option value="0">모든 크기</option>
+      <option value="200">200px 이상</option>
+      <option value="400">400px 이상</option>
+      <option value="800">800px 이상</option>
+    </select>
+  </div>
+
+  <div class="toolbar">
+    <label><input id="selectAll" type="checkbox"> 전체 선택</label>
+    <span id="count">불러오는 중…</span>
+  </div>
+
+  <section id="list" class="grid" aria-live="polite"></section>
+
   <footer>
-    <button id="copy">선택 URL 복사</button>
-    <button id="download">선택 다운로드</button>
-    <button id="zip">ZIP</button>
+    <button id="download" type="button" class="brand">저장</button>
+    <button id="zip" type="button">ZIP</button>
+    <button id="copy" type="button">URL 복사</button>
   </footer>
-  <h2 class="hist-title">최근 수집</h2>
-  <section id="history"></section>
-  <p id="status"></p>
+  <p id="status" role="status"></p>
+
+  <details id="historyBox">
+    <summary>최근 분석한 페이지</summary>
+    <section id="history"></section>
+  </details>
+
+  <p class="tips">팁: 페이지에서 이미지를 <b>Alt(⌥)+클릭</b>하면 그 이미지의 원본 주소를 바로 분석합니다. 우클릭 메뉴에도 있어요.</p>
 </main>
+<script src="shared.js"></script>
 <script src="popup.js"></script>
+</html>

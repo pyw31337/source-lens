@@ -1,25 +1,58 @@
 <!doctype html>
+<html lang="ko">
 <meta charset="utf-8">
 <title>Source Lens 설정</title>
 <style>
-  :root{--brand:#3ecf8e;--bg:#1c1c1c;--fg:#ededed;--muted:#8d8d8d;--border:#343434;--surface:#242424}
-  body{font:14px/1.55 ui-sans-serif,system-ui,-apple-system,sans-serif;max-width:720px;margin:48px auto;padding:0 20px;color:var(--fg);background:var(--bg)}
-  h1{font-size:22px;font-weight:600;letter-spacing:-.4px}
+  :root{--brand:#3ecf8e;--bg:#1c1c1c;--fg:#ededed;--muted:#9a9a9a;--border:#343434;--surface:#242424}
+  body{font:14px/1.6 ui-sans-serif,system-ui,-apple-system,"Apple SD Gothic Neo","Malgun Gothic",sans-serif;max-width:720px;margin:40px auto;padding:0 20px;color:var(--fg);background:var(--bg)}
+  h1{font-size:22px;font-weight:650;letter-spacing:-.4px;margin-bottom:4px}
   h1 small{color:var(--muted);font-size:12px;margin-left:8px}
-  p{color:var(--muted)}
+  h2{font-size:15px;margin:28px 0 8px;color:var(--brand)}
+  p,li{color:var(--muted)}
   b{color:var(--fg)}
-  code{background:var(--surface);border:1px solid var(--border);padding:2px 6px;border-radius:4px;color:var(--brand);font-size:12px}
-  kbd{background:var(--surface);border:1px solid var(--border);padding:1px 6px;border-radius:4px;font-size:12px}
+  kbd{background:var(--surface);border:1px solid var(--border);padding:1px 6px;border-radius:4px;font-size:12px;color:var(--fg)}
+  .card{border:1px solid var(--border);background:var(--surface);border-radius:8px;padding:14px 16px}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:16px;padding:10px 0;border-bottom:1px solid var(--border)}
+  .row:last-child{border-bottom:0}
+  .row span small{display:block;color:var(--muted);font-size:12px}
+  input[type=text],select{height:32px;border:1px solid var(--border);border-radius:6px;background:var(--bg);color:var(--fg);padding:0 9px;font:inherit}
+  input[type=checkbox]{width:18px;height:18px;accent-color:var(--brand)}
+  button{height:34px;border:1px solid var(--brand);border-radius:6px;background:var(--brand);color:#111;font:600 13px/1 inherit;padding:0 14px;cursor:pointer}
+  #saved{color:var(--brand);font-size:12px;margin-left:8px}
+  ul{padding-left:20px}
 </style>
-<h1>Source Lens <small>0.9.0</small></h1>
+<h1>Source Lens <small id="ver"></small></h1>
+<p>웹페이지의 이미지·영상·SVG 원본 주소를 찾아 보여주고 저장합니다.</p>
 
+<h2>사용법</h2>
+<div class="card">
+  <ul>
+    <li><b>확장 아이콘 클릭</b> → 이 페이지의 이미지·영상·SVG 목록. 검색·크기 필터·체크박스로 골라서 <b>저장 / ZIP / URL 복사</b>.</li>
+    <li><b>페이지에서 크게 보기</b> (기본 단축키 <kbd id="k-panel">Alt+Shift+D</kbd>) → 페이지 위에 큰 패널이 열립니다.</li>
+    <li><b>Alt(⌥)+클릭</b> → 클릭한 이미지·영상·SVG 하나만 분석. 마우스를 올리고 <kbd id="k-inspect">Alt+Shift+S</kbd> 를 눌러도 됩니다.</li>
+    <li><b>우클릭 메뉴</b> → 「이 요소의 원본 주소 분석」 / 「이 페이지 미디어 모두 보기」.</li>
+    <li>패널 단축키: <kbd>1</kbd>–<kbd>4</kbd> 탭 이동, <kbd>/</kbd> 검색, <kbd>S</kbd> 저장, <kbd>C</kbd> 복사, 크게 보기에서 <kbd>←</kbd> <kbd>→</kbd>, <kbd>Esc</kbd> 닫기.</li>
+  </ul>
+  <button id="shortcuts" type="button">단축키 바꾸기</button>
+</div>
 
+<h2>설정</h2>
+<div class="card">
+  <label class="row"><span>Alt(⌥)+클릭으로 분석<small>끄면 Alt+클릭이 원래 사이트 동작대로 작동합니다.</small></span><input id="altClick" type="checkbox"></label>
+  <label class="row"><span>Alt+클릭한 영상 바로 저장<small>영상을 Alt+클릭하면 원본 저장(안 되면 녹화)을 바로 시작합니다.</small></span><input id="autoVideo" type="checkbox"></label>
+  <label class="row"><span>패널 위치</span><select id="dock"><option value="right">오른쪽</option><option value="left">왼쪽</option></select></label>
+  <label class="row"><span>저장 폴더 이름<small>다운로드 폴더 안에 이 이름의 폴더로 저장됩니다.</small></span><input id="folder" type="text" placeholder="source-lens"></label>
+  <div class="row"><span></span><span><button id="save" type="button">저장</button><span id="saved"></span></span></div>
+</div>
 
-
-
-
-<p><b>Alt+클릭</b>으로 요소를 분석하거나, 확장 아이콘의 <b>영상 원클릭 저장</b>을 쓰세요.</p>
-<p>이미지/SVG 탭의 <b>ZIP 저장</b>은 최대 40개를 한 파일로 받습니다. srcset 중복은 가장 큰 원본만 남깁니다.</p>
-<p>패널에서 <kbd>1</kbd>–<kbd>4</kbd> 탭 전환, <kbd>S</kbd> 저장, <kbd>C</kbd> URL 복사, <kbd>Esc</kbd> 닫기.</p>
-<p>분석 결과는 현재 탭에서만 처리됩니다. DRM 우회, 로그인 보호 해제, 서명 위조는 하지 않습니다.</p>
-
+<h2>알아두기</h2>
+<div class="card">
+  <ul>
+    <li>「만료 주소」 표시가 있는 링크(인스타그램·페이스북 등)는 시간이 지나면 열리지 않습니다. 바로 저장하세요.</li>
+    <li>ZIP은 한 번에 최대 40개까지 묶습니다. 인스타그램 CDN처럼 막힌 곳은 하나씩 저장됩니다.</li>
+    <li>유튜브·넷플릭스 등 보호된 영상은 저장하지 않습니다. DRM 우회, 로그인 보호 해제, 서명 위조는 하지 않습니다.</li>
+    <li>분석은 현재 탭 안에서만 이뤄지고 외부 서버로 아무것도 보내지 않습니다.</li>
+  </ul>
+</div>
+<script src="options.js"></script>
+</html>

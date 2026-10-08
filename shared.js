@@ -28,7 +28,7 @@
 
   SL.esc = function esc(value) {
     return String(value ?? '').replace(/[&<>"']/g, ch => ({
-      '&': '&', '<': '<', '>': '>', '"': '"', "'": '&#39;'
+      '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
     }[ch]));
   };
 
@@ -284,6 +284,76 @@
       type: 'image',
       confidence: i === 0 ? '최상' : '높음'
     }));
+  };
+
+  SL.parseSrcset = function parseSrcset(srcset) {
+    const text = String(srcset || '');
+    const out = [];
+    let i = 0;
+    while (i < text.length) {
+      while (i < text.length && /[\s,]/.test(text[i])) i++;
+      if (i >= text.length) break;
+      let j = i;
+      while (j < text.length && !/\s/.test(text[j])) j++;
+      let url = text.slice(i, j);
+      let desc = '';
+      if (/,+$/.test(url)) {
+        url = url.replace(/,+$/, '');
+      } else {
+        let k = j;
+        while (k < text.length && text[k] !== ',') k++;
+        desc = text.slice(j, k).trim();
+        j = k;
+      }
+      i = j + 1;
+      if (!url) continue;
+      const m = /([\d.]+)\s*([wx])/i.exec(desc);
+      out.push({ url, value: m ? parseFloat(m[1]) : 1, unit: m ? m[2].toLowerCase() : 'x' });
+    }
+    return out;
+  };
+
+  SL.largestSrcset = function largestSrcset(srcset) {
+    let best = '', score = -1;
+    SL.parseSrcset(srcset).forEach(c => {
+      if (c.value >= score) { score = c.value; best = c.url; }
+    });
+    return best;
+  };
+
+  SL.extOf = function extOf(url, type, mime) {
+    const fromMime = {
+      'image/jpeg': 'jpg', 'image/png': 'png', 'image/webp': 'webp', 'image/avif': 'avif', 'image/gif': 'gif',
+      'image/svg+xml': 'svg', 'video/mp4': 'mp4', 'video/webm': 'webm', 'video/quicktime': 'mov'
+    }[String(mime || '').split(';')[0].toLowerCase()];
+    if (fromMime) return fromMime;
+    if (/^data:image\/svg/i.test(url || '')) return 'svg';
+    try {
+      const path = new URL(url, 'https://x.invalid').pathname;
+      const m = /\.([a-z0-9]{2,5})$/i.exec(path);
+      if (m && /^(?:jpe?g|png|gif|webp|avif|bmp|svg|ico|jfif|heic|mp4|m4v|mov|webm|mkv|ogv|m3u8|mpd)$/i.test(m[1])) {
+        return m[1].toLowerCase() === 'jpeg' ? 'jpg' : m[1].toLowerCase();
+      }
+      const fmt = new URL(url, 'https://x.invalid').searchParams.get('format') || new URL(url, 'https://x.invalid').searchParams.get('fm');
+      if (fmt && /^(?:jpe?g|png|webp|avif|gif)$/i.test(fmt)) return fmt.toLowerCase().replace('jpeg', 'jpg');
+    } catch { /* ignore */ }
+    return type === 'svg' ? 'svg' : type === 'video' ? 'mp4' : 'jpg';
+  };
+
+  SL.downloadName = function downloadName(item, host) {
+    const site = String(host || 'web').replace(/^www\./, '');
+    const isData = /^data:/i.test(item?.url || '');
+    let base = isData ? (item?.name || item?.type || 'media') : (SL.fileName(item?.url || '') || item?.type || 'media');
+    base = String(base).replace(/\.[a-z0-9]{2,5}$/i, '');
+    if (/^session-video$/.test(base)) base = 'video';
+    const ext = SL.extOf(item?.url || '', item?.type, item?.mime);
+    return `${site}-${base}`.replace(/[^a-z0-9._-]+/gi, '-').replace(/-+/g, '-').slice(0, 70) + `.${ext}`;
+  };
+
+  SL.isTypingTarget = function isTypingTarget(node) {
+    if (!node || node.nodeType !== 1) return false;
+    if (/^(?:INPUT|TEXTAREA|SELECT)$/.test(node.tagName)) return true;
+    return !!node.isContentEditable;
   };
 
   if (typeof module !== 'undefined' && module.exports) module.exports = SL;

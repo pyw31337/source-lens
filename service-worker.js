@@ -33,6 +33,53 @@ async function fetchMedia(url) {
   throw new Error(errors.join(' | ') || 'fetch failed');
 }
 
+const metaCache = new Map();
+
+async function resourceMeta(url) {
+  if (metaCache.has(url)) return metaCache.get(url);
+  let size = null, mime = '';
+  const read = response => {
+    mime = mime || (response.headers.get('content-type') || '').split(';')[0];
+    const range = response.headers.get('content-range');
+    const total = range && /\/(\d+)\s*$/.exec(range);
+    const len = Number(response.headers.get('content-length'));
+    if (total) size = Number(total[1]);
+    else if (response.status === 200 && Number.isFinite(len) && len > 0) size = len;
+  };
+  try {
+    const head = await fetch(url, { method: 'HEAD', credentials: 'omit', redirect: 'follow', cache: 'force-cache' });
+    if (head.ok) read(head);
+  } catch { /* try range */ }
+  if (!size) {
+    try {
+      const controller = new AbortController();
+      const response = await fetch(url, { headers: { Range: 'bytes=0-0' }, credentials: 'omit', redirect: 'follow', signal: controller.signal });
+      if (response.ok) read(response);
+      controller.abort();
+    } catch { /* ignore */ }
+  }
+  const result = { size, mime };
+  metaCache.set(url, result);
+  if (metaCache.size > 800) metaCache.delete(metaCache.keys().next().value);
+  return result;
+}
+
+async function prefs() {
+  try {
+    const data = await chrome.storage.local.get('slPrefs');
+    return data?.slPrefs || {};
+  } catch {
+    return {};
+  }
+}
+
+async function targetName(filename) {
+  const p = await prefs();
+  const folder = String(p.folder || 'source-lens').replace(/[\\:*?"<>|]+/g, '_').replace(/^\/+|\/+$/g, '').replace(/\.\.+/g, '_') || 'source-lens';
+  const name = String(filename || 'source-lens/media');
+  return name.replace(/^source-lens\//, `${folder}/`);
+}
+
 function crcTable() {
   if (crcTable.t) return crcTable.t;
   const t = new Uint32Array(256);
@@ -106,11 +153,12 @@ function zipStore(files) {
   return out;
 }
 
-function downloadBase64(mime, base64, filename) {
+async function downloadBase64(mime, base64, filename) {
+  const name = await targetName(filename || 'source-lens/media');
   return new Promise(resolve => {
     chrome.downloads.download({
       url: `data:${mime};base64,${base64}`,
-      filename: filename || 'source-lens/media',
+      filename: name,
       saveAs: false,
       conflictAction: 'uniquify'
     }, () => resolve({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message || '' }));
@@ -152,8 +200,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message?.type === 'resourceMeta') {
     (async () => {
       try {
-        const { buffer, mime } = await fetchMedia(message.url);
-        sendResponse({ size: buffer.byteLength, mime });
+        sendResponse(await resourceMeta(message.url));
       } catch { sendResponse({ size: null, mime: '' }); }
     })();
     return true;
@@ -221,7 +268,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         const url = URL.createObjectURL(new Blob([zip], { type: 'application/zip' }));
         chrome.downloads.download({
           url,
-          filename: message.filename || 'source-lens/media.zip',
+          filename: await targetName(message.filename || 'source-lens/media.zip'),
           saveAs: false,
           conflictAction: 'uniquify'
         }, () => {
@@ -235,15 +282,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   }
   if (message?.type === 'downloadUrl') {
-
-    chrome.downloads.download({
-      url: message.url,
-      filename: message.filename || 'source-lens/media',
-      saveAs: false,
-      conflictAction: 'uniquify'
-    }, () => sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message || '' }));
+    (async () => {
+      const filename = await targetName(message.filename || 'source-lens/media');
+      chrome.downloads.download({
+        url: message.url,
+        filename,
+        saveAs: false,
+        conflictAction: 'uniquify'
+      }, () => sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message || '' }));
+    })();
     return true;
   }
+
   if (message?.type === 'downloadBase64' || message?.type === 'downloadBuffer') {
     (async () => {
       try {
@@ -260,13 +310,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 });
 
+function injectContent(tabId, frameIds) {
+  const target = frameIds ? { tabId, frameIds } : { tabId };
+  return new Promise(resolve => {
+    chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'extractors.js'], world: 'MAIN' }, () => {
+      void chrome.runtime.lastError;
+      chrome.scripting.executeScript({ target, files: ['shared.js', 'platform-profiles.js', 'content.js'] }, () => {
+        resolve(!chrome.runtime.lastError);
+      });
+    });
+  });
+}
+
+// Sends a message to the page; if the content script is missing (tab opened before
+// the extension was installed/reloaded), injects it once and retries.
+function sendToTab(tabId, payload, frameId) {
+  const options = frameId == null ? {} : { frameId };
+  return new Promise(resolve => {
+    chrome.tabs.sendMessage(tabId, payload, options, response => {
+      if (!chrome.runtime.lastError) return resolve(response || { ok: true });
+      injectContent(tabId, frameId == null ? undefined : [frameId]).then(ok => {
+        if (!ok) return resolve({ ok: false, error: 'inject-failed' });
+        chrome.tabs.sendMessage(tabId, payload, options, retry => {
+          resolve(chrome.runtime.lastError ? { ok: false, error: chrome.runtime.lastError.message } : (retry || { ok: true }));
+        });
+      });
+    });
+  });
+}
+
 chrome.runtime.onInstalled.addListener(() => {
   if (!chrome.contextMenus) return;
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({
       id: 'inspect-source',
-      title: 'Source Lens: 소스 URL 분석',
+      title: 'Source Lens: 이 요소의 원본 주소 분석',
       contexts: ['image', 'video', 'audio', 'link', 'page']
+    });
+    chrome.contextMenus.create({
+      id: 'open-panel',
+      title: 'Source Lens: 이 페이지 미디어 모두 보기',
+      contexts: ['image', 'video', 'audio', 'link', 'page', 'selection']
     });
   });
 });
@@ -274,14 +358,22 @@ chrome.runtime.onInstalled.addListener(() => {
 if (chrome.contextMenus?.onClicked) {
   chrome.contextMenus.onClicked.addListener((info, tab) => {
     if (!tab?.id) return;
-    const payload = { type: 'contextInspect', info };
-    const options = info.frameId == null ? {} : { frameId: info.frameId };
-    chrome.tabs.sendMessage(tab.id, payload, options, () => {
-      if (!chrome.runtime.lastError) return;
-      chrome.scripting?.executeScript({
-        target: { tabId: tab.id, frameIds: info.frameId == null ? undefined : [info.frameId] },
-        files: ['shared.js', 'platform-profiles.js', 'content.js']
-      }, () => chrome.tabs.sendMessage(tab.id, payload, options, () => void chrome.runtime.lastError));
-    });
+    if (info.menuItemId === 'open-panel') {
+      sendToTab(tab.id, { type: 'openPanel' }, 0);
+      return;
+    }
+    sendToTab(tab.id, { type: 'contextInspect', info }, info.frameId == null ? undefined : info.frameId);
+  });
+}
+
+if (chrome.commands?.onCommand) {
+  chrome.commands.onCommand.addListener((command, tab) => {
+    const run = t => {
+      if (!t?.id || !/^https?:/i.test(t.url || '')) return;
+      if (command === 'inspect-selection') sendToTab(t.id, { type: 'hotkeyInspect' }, 0);
+      if (command === 'open-panel') sendToTab(t.id, { type: 'openPanel' }, 0);
+    };
+    if (tab?.id) run(tab);
+    else chrome.tabs.query({ active: true, currentWindow: true }, tabs => run(tabs[0]));
   });
 }

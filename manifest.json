@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Source Lens",
-  "version": "0.9.0",
+  "version": "1.0.0",
   "description": "페이지에서 이미지·영상·SVG의 실제 리소스 URL을 찾고, 만료·세션 제약을 설명한 뒤 저장합니다.",
   "permissions": [
     "contextMenus",
@@ -21,7 +21,7 @@
     ]
   },
   "action": {
-    "default_title": "Source Lens",
+    "default_title": "Source Lens — 이미지·영상·SVG 원본 찾기",
     "default_popup": "popup.html",
     "default_icon": {
       "16": "icon-16.png",
@@ -62,7 +62,11 @@
   "commands": {
     "inspect-selection": {
       "suggested_key": { "default": "Alt+Shift+S" },
-      "description": "커서가 있는 미디어를 분석"
+      "description": "마우스가 올라간 이미지·영상 분석 (없으면 페이지 전체 보기)"
+    },
+    "open-panel": {
+      "suggested_key": { "default": "Alt+Shift+D" },
+      "description": "이 페이지의 미디어를 패널로 모두 보기"
     }
   },
   "icons": {
