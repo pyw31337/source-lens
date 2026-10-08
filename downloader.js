@@ -182,7 +182,7 @@ async function runHls(signal) {
     }).map(v => ({ value: v.url, label: v.height ? `${Math.min(v.width || v.height, v.height)}p · ${(v.bandwidth / 1e6).toFixed(1)}Mbps` : `${(v.bandwidth / 1e6).toFixed(1)}Mbps`, v }));
     const want = Number($('#quality').value ? 0 : job.quality) || 0;
     let chosen = choices.find(c => c.value === $('#quality').value)
-      || (want ? choices.find(c => Math.min(c.v.width || c.v.height, c.v.height) <= want) : null)
+      || choices.filter(c => MT.shortSide(c.v) <= (want || 1080)).sort((a, b) => (MT.shortSide(b.v) - MT.shortSide(a.v)) || (Number(/avc1/.test(b.v.codecs)) - Number(/avc1/.test(a.v.codecs))) || (b.v.bandwidth - a.v.bandwidth))[0]
       || choices.slice().sort((a, b) => (b.v.height - a.v.height) || (Number(/avc1/.test(b.v.codecs)) - Number(/avc1/.test(a.v.codecs))) || (b.v.bandwidth - a.v.bandwidth))[0];
     showChoices(choices, chosen.value);
     const v = chosen.v;
@@ -254,7 +254,8 @@ async function runDash(signal) {
   if (choices.length) {
     const sel = choices.find(c => c.value === $('#quality').value);
     const want = Number(job.quality) || 0;
-    video = sel?.r || MT.pickDashVideo(mpd.video, want || 0);
+    // Default: best quality up to 1080p (sizes stay reasonable and it plays everywhere); 4K is in the menu.
+    video = sel?.r || MT.pickDashVideo(mpd.video, want || 1080);
     showChoices(choices, choices.find(c => c.r === video)?.value);
   }
   const sameFamily = mpd.audio.filter(a => (a.mime || '').split('/')[1] === (video?.mime || 'video/mp4').split('/')[1]);

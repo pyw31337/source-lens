@@ -260,11 +260,12 @@ if (chrome.webRequest?.onHeadersReceived) {
       addTabMedia(details.tabId, { url, manifest, t: Date.now(), frameId: details.frameId });
       return;
     }
-    if (!/^video\//.test(ct) || MEDIA_NOISE.test(url) || details.statusCode === 206 && !header('content-range')) return;
+    // Whole files are played by the <video> element itself ("media"); fetch/XHR video responses are stream pieces.
+    if (details.type !== 'media' || !/^video\//.test(ct) || MEDIA_NOISE.test(url) || (details.statusCode === 206 && !header('content-range'))) return;
     const range = /\/(\d+)\s*$/.exec(header('content-range'));
     const size = range ? Number(range[1]) : Number(header('content-length')) || 0;
     if (size && size < 200_000) return;
-    addTabMedia(details.tabId, { url, manifest: '', mime: ct.split(';')[0], size, t: Date.now(), frameId: details.frameId });
+    addTabMedia(details.tabId, { url, manifest: '', type: details.type, mime: ct.split(';')[0], size, t: Date.now(), frameId: details.frameId });
   }, { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest', 'other'] }, ['responseHeaders']);
 }
 

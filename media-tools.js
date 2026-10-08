@@ -193,7 +193,8 @@
         type: 'hls', master: p.master, drm: p.drm, live: !p.master && !p.endList, segments: p.segments.length,
         duration: Math.round(p.duration), heights, best: heights[0] || 0, codecs: p.variants[0]?.codecs || '',
         variants: p.variants.map(v => ({ url: v.url, height: v.height, width: v.width, bandwidth: v.bandwidth })),
-        audio: p.audio.map(a => a.url)
+        audioUrls: p.audio.map(a => a.url),
+        audio: p.audio.length > 0 || p.variants.some(v => /mp4a|ac-3|ec-3|opus/i.test(v.codecs)) || (!p.master ? null : false)
       };
     }
     if (/<MPD[\s>]/.test(text)) {
@@ -219,13 +220,14 @@
     throw new Error('스트림 매니페스트가 아닙니다');
   };
 
+  MT.shortSide = v => Math.min(v.width || v.height || 0, v.height || v.width || 0);
   MT.pickDashVideo = function pickDashVideo(video, maxHeight) {
-    const ok = video.filter(v => !maxHeight || v.height <= maxHeight);
+    const ok = video.filter(v => !maxHeight || MT.shortSide(v) <= maxHeight);
     const pool = ok.length ? ok : video;
     if (!pool.length) return null;
-    const top = pool[0].height;
+    const top = Math.max(...pool.map(MT.shortSide));
     // Same height: prefer H.264 (plays everywhere, incl. QuickTime on Mac).
-    return pool.filter(v => v.height === top).sort((a, b) => (Number(/^avc/.test(b.codecs)) - Number(/^avc/.test(a.codecs))) || (b.bandwidth - a.bandwidth))[0];
+    return pool.filter(v => MT.shortSide(v) === top).sort((a, b) => (Number(/^avc/.test(b.codecs)) - Number(/^avc/.test(a.codecs))) || (b.bandwidth - a.bandwidth))[0];
   };
 
   // ---------------------------------------------------------------- bytes helpers

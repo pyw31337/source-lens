@@ -26,6 +26,7 @@
   const isManifest = url => /\.m3u8(?:$|[?#])|\.mpd(?:$|[?#])|format=m3u8|manifest\(format=/i.test(url);
   const manifestType = url => (/\.mpd(?:$|[?#])|format=mpd/i.test(url) ? 'dash' : 'hls');
   const FILE = /\.(?:mp4|m4v|webm|mov|mkv)(?:$|[?#])/i;
+  const SEGMENT = /(?:[_\-/](?:seg|chunk|frag|init|part)[_\-]?\d*|[_\-]\d{1,6})\.(?:m4v|m4s|mp4|m4a|webm|cmfv|cmfa)(?:$|[?#])/i;
 
   // ------------------------------------------------------------------ inputs
   root.addEventListener('sl-video-groups', ev => {
@@ -116,6 +117,7 @@
     const parts = t.split(/\s+\|\s+/).filter(x => !/^(?:[\d.,]+\s*[KMB천만]?\s*(?:views?|reactions?|회|조회|반응))|^By\s|^(?:Facebook|Instagram|YouTube)$|views ·|조회수/i.test(x.trim()));
     return (parts.join(' ') || t).replace(/\s*[|•·-]\s*(Instagram|Facebook|YouTube)\s*$/i, '').replace(/^\(\d+\)\s*/, '');
   }
+  V.title = () => title();
   V.fileName = (item, ext) => {
     const base = [host(), slug(item.title || item.code || title()) || 'video', item.quality || ''].filter(Boolean).join('-');
     return `${base}.${ext || item.ext || 'mp4'}`;
@@ -176,7 +178,9 @@
     const paths = loadedPaths();
     const pageTitle = title();
 
+    const safe = (name, fn) => { try { fn(); } catch (e) { console.warn('[Source Lens] video section failed:', name, e); } };
     // 1) Platform JSON groups (Instagram / Facebook / JSON-LD)
+    safe('groups', () => {
     const groups = (st.groups || []).filter(g => g.progressive?.length || g.mpd || g.mpdUrl || g.hls);
     groups.forEach(g => {
       const mpd = g.mpd ? parseMpdCached(g.mpd) : null;
@@ -229,13 +233,15 @@
       if (g.hls) push({ ...base, kind: 'hls', url: g.hls, quality: '', source: 'HLS 스트림', job: { kind: 'hls', url: g.hls, referer: location.href, title: base.title }, note: '스트리밍(HLS) · 조각을 모두 받아 하나의 MP4로 합칩니다' });
     });
 
+    });
     // 2) Stream manifests seen on the network (hls.js, dash.js, video.js, Shaka …)
     const manifests = new Map();
+    safe('manifests', () => {
     [...st.net.values()].filter(n => n.manifest).forEach(n => manifests.set(n.url, n));
     st.sw.filter(m => m.manifest).forEach(m => { if (!manifests.has(m.url)) manifests.set(m.url, { url: m.url, manifest: m.manifest, t: m.t }); });
     const childOfMaster = new Set();
     st.probes.forEach(p => (p.variants || []).forEach(v => childOfMaster.add(v.url)));
-    st.probes.forEach(p => (p.audio || []).forEach(a => childOfMaster.add(a)));
+    st.probes.forEach(p => (Array.isArray(p.audioUrls) ? p.audioUrls : []).forEach(a => childOfMaster.add(a)));
     [...manifests.values()].sort((a, b) => b.t - a.t).forEach(n => {
       if (childOfMaster.has(n.url)) return;
       if (s === 'youtube' && /googlevideo|youtube\.com\/api\/manifest/i.test(n.url)) return;
@@ -249,18 +255,22 @@
       }
       if (p && !p.error && !p.master && !p.segments && type === 'hls') return; // empty / not a media playlist
       const quality = p?.best ? `${p.best}p` : '';
-      const extra = p?.heights?.length > 1 ? ` · 화질 ${p.heights.map(h => `${h}p`).join('/')} 중 선택 가능` : '';
+      const extra = p?.heights?.length > 1
+        ? ` · 화질 ${p.heights.map(h => `${h}p`).join('/')} 중 선택 가능${p.best > 1080 ? ' (기본은 1080p, 저장 창에서 더 높은 화질 선택)' : ''}`
+        : '';
       const live = p?.live ? ' · 라이브 방송은 지금까지 올라온 구간만 저장됩니다' : '';
       push({
-        ...base, kind: type, quality, rank: p?.best || 0, codec: codecName(p?.codecs), audio: p ? p.audio !== false : null,
+        ...base, kind: type, quality, rank: p?.best || 0, codec: codecName(p?.codecs), audio: p && typeof p.audio === 'boolean' ? p.audio : null,
         duration: p?.duration || 0, live: !!p?.live,
         job: { kind: type, url: n.url, referer: location.href, title: pageTitle },
         note: `스트리밍(${label}) · 조각을 모두 받아 하나의 MP4로 합칩니다${extra}${live}${p?.error ? ' · (미리 확인 실패, 저장 시 다시 시도)' : ''}`
       });
     });
 
+    });
     // 3) Plain files: <video src>, <source>, network .mp4/.webm
     const videos = pageVideos();
+    safe('files', () => {
     const fileUrls = new Map();
     videos.forEach(v => {
       [v.currentSrc, v.src, ...[...v.querySelectorAll('source')].map(x => x.src)].forEach(u => {
@@ -271,9 +281,10 @@
         }
       });
     });
+    // Files the page fetches itself (fetch/XHR) are MSE stream pieces, never whole videos, so only the
+    // browser's own media requests (a <video> playing a real file, seen by the service worker) count here.
     if (s !== 'instagram' && s !== 'facebook' && s !== 'youtube') {
-      [...st.net.values()].filter(n => !n.manifest).forEach(n => { if (!fileUrls.has(n.url)) fileUrls.set(n.url, {}); });
-      st.sw.filter(m => !m.manifest && (m.size || 0) > 200_000).forEach(m => { if (!fileUrls.has(m.url)) fileUrls.set(m.url, { size: m.size }); });
+      st.sw.filter(m => !m.manifest && m.type === 'media' && (m.size || 0) > 200_000 && !SEGMENT.test(m.url)).forEach(m => { if (!fileUrls.has(m.url)) fileUrls.set(m.url, { size: m.size }); });
     }
     fileUrls.forEach((info, url) => {
       if (/googlevideo|fbcdn|cdninstagram/.test(url)) return;
@@ -284,7 +295,9 @@
       });
     });
 
+    });
     // 4) Every visible player: recording fallback (or DRM notice)
+    safe('players', () => {
     const hasSaveable = items.some(i => i.kind !== 'drm');
     videos.filter(v => {
       const r = v.getBoundingClientRect();
@@ -294,6 +307,8 @@
       const q = pLabel(v.videoWidth, v.videoHeight);
       const base = { type: 'video', url: `video:${vid}`, vid, element: v, quality: q, width: v.videoWidth, height: v.videoHeight, playing: !v.paused, title: pageTitle, duration: Number.isFinite(v.duration) ? v.duration : 0 };
       if (isDrm(v) || (st.drm && /^blob:/i.test(v.currentSrc || ''))) {
+        const known = items.find(i => i.kind === 'drm' && !i.element);
+        if (known) { Object.assign(known, { element: v, vid, playing: !v.paused }); return; }
         push({ ...base, kind: 'drm', source: '보호된 영상', note: `DRM(${st.drm || 'Widevine'}) 보호 영상이라 저장할 수 없습니다. 녹화해도 검은 화면이 됩니다.` });
         return;
       }
@@ -308,6 +323,7 @@
       });
     });
 
+    });
     const order = { direct: 0, dash: 1, hls: 1, record: 3, drm: 4 };
     items.forEach((it, i) => { it._i = i; });
     const live = i => Number(!!(i.group && i.playing));

@@ -1342,7 +1342,7 @@
           if (tracks.length) blob = new Blob(MT.writeMp4(tracks), { type: 'video/mp4' });
         } catch (e) { console.warn('[Source Lens] mp4 rewrite skipped', e); }
       }
-      const name = VF.fileName({ title: document.title, quality: video.videoHeight ? `${Math.min(video.videoWidth, video.videoHeight)}p-녹화` : '녹화' }, ext);
+      const name = VF.fileName({ title: VF.title(), quality: video.videoHeight ? `${Math.min(video.videoWidth, video.videoHeight)}p-녹화` : '녹화' }, ext);
       state.lastRecording = { ok: true, size: blob.size, mime: blob.type, name };
       captureHud(`저장 중… (${(blob.size / 1048576).toFixed(1)}MB)`);
       const finish = ok => {
