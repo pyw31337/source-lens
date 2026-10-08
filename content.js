@@ -7,11 +7,13 @@
   window.__sourceLensAlive = alive;
 
   const SL = globalThis.SourceLens;
+  const VF = window.__slVideo;
+  const MT = globalThis.SourceLensMedia;
   const state = {
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
     candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
-    recorder: null, captureTimer: 0,
+    recorder: null, captureTimer: 0, videoItems: [],
     query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
     lastPoint: null, lightboxItem: null, toastTimer: 0, autoVideo: true
   };
@@ -188,18 +190,25 @@
   function videoEmptyMessage() {
     const k = siteKind();
     if (k === 'commerce') return '이 페이지에는 재생할 영상 파일이 없습니다. LIVE 표기는 SVG 배지입니다.';
-    if (k === 'instagram' || k === 'facebook' || k === 'tiktok') {
-      return '이 사이트 영상은 브라우저 확장으로 원본 저장이 불가합니다. 주소가 만료되고 로그인이 묶여 있습니다.';
-    }
-    if (k === 'youtube') return '유튜브 원본 mp4는 확장에서 받을 수 없습니다. 로컬 yt-dlp가 필요합니다.';
-    if (k === 'vimeo') return '프로그레시브 mp4가 있으면 저장됩니다. 없으면 받을 수 없습니다.';
-    if (k === 'naver' || k === 'kakao' || k === 'daum') return '플레이어 파일 주소가 공개된 경우에만 저장됩니다.';
-    return '파일 주소가 없으면 이 탭에서 영상을 저장할 수 없습니다.';
+    return '영상을 찾지 못했습니다. 영상을 한 번 재생한 뒤(인스타·페북은 영상을 화면에 띄운 뒤) 다시 열어 보세요.';
   }
 
+  // Since 1.1 no site is blanket-blocked: every video gets a concrete way to save (or a clear reason why not).
   function videoLocked() {
-    return ['instagram', 'facebook', 'tiktok'].includes(siteKind());
+    return false;
   }
+
+  function refreshVideoItems() {
+    try { state.videoItems = VF ? VF.collect() : []; } catch (e) { state.videoItems = []; }
+    return state.videoItems;
+  }
+  if (VF) VF.onChange(() => {
+    if (!state.panel) return;
+    const before = state.videoItems.map(i => i.kind + i.url + i.quality).join('|');
+    refreshVideoItems();
+    const after = state.videoItems.map(i => i.kind + i.url + i.quality).join('|');
+    if (before !== after) state.updateVideoTab?.();
+  });
 
   function itemPixel(item) {
     const url = item?.url || '';
@@ -730,9 +739,11 @@
     const all = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
       .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)))
       .map(plainItem).filter(Boolean);
+    let videos = [];
+    try { videos = refreshVideoItems().map(VF.plain); } catch { videos = []; }
     return {
       images: all.filter(i => i.type === 'image'),
-      videos: all.filter(i => i.type === 'video'),
+      videos,
       svgs: all.filter(i => i.type === 'svg'),
       host: location.hostname,
       title: document.title,
@@ -1088,6 +1099,7 @@
 
   function liveUrl(item) {
     if (!item) return '';
+    if (item.kind) return /^https?:/i.test(item.url || '') ? item.url : (item.job?.url || '');
     if (item.temporary) return state.postUrl || item.url || '';
     // Rewritten (guessed "original") URLs can 404 on some CDNs, so fall back to what the page really loaded.
     const src = item.element?.currentSrc;
@@ -1110,8 +1122,21 @@
       });
       actions.append(actionButton('normal', '분할 편집', () => { extra.onSlice?.(); openSliceEditor(item); }));
     }
-    if (item.type === 'video' && !videoLocked()) {
-      actions.append(actionButton('primary', state.recorder ? '지금 저장' : '원클릭 저장', ev => oneClickSaveVideo(item, ev.currentTarget)));
+    if (item.type === 'video') {
+      const video = item.element?.tagName === 'VIDEO' ? item.element : state.selectedMedia;
+      const best = VF ? VF.best(refreshVideoItems(), video || null) : null;
+      if (best) {
+        const label = state.recorder ? '녹화 멈추고 저장' : best.kind === 'drm' ? 'DRM 보호 (저장 불가)' : `영상 저장 · ${best.badge}${best.quality ? ` ${best.quality}` : ''}`;
+        const btn = actionButton('primary', label, ev => (state.recorder ? stopRecording(true) : saveVideo(best, ev.currentTarget)));
+        btn.title = best.note || '';
+        if (best.kind === 'drm') btn.disabled = true;
+        actions.prepend(btn);
+        const note = document.createElement('p');
+        note.className = 'sl-vnote';
+        note.textContent = best.note || '';
+        actions.after(note);
+      }
+      actions.append(actionButton('normal', '영상 저장 방법 모두 보기', () => state.switchTab?.('video')));
       actions.append(actionButton('normal', 'yt-dlp 복사', ev => copy(ytdlpCommand(), ev.currentTarget)));
     }
   }
@@ -1137,18 +1162,6 @@
     return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
   }
 
-  function captureHud(text) {
-    let hud = uiRoot().querySelector('.sl-capture-hud');
-    if (!text) { hud?.remove(); return; }
-    if (!hud) {
-      hud = document.createElement('div');
-      hud.className = 'sl-capture-hud';
-      hud.onclick = () => { try { state.recorder?.stop(); } catch { /* ignore */ } };
-      uiRoot().append(hud);
-    }
-    hud.textContent = text;
-  }
-
   function directVideoItem() {
     const pool = [...(state.candidates || []), ...(state.platformMedia || []), ...collectPageMedia()];
     return pool.find(i => i?.type === 'video' && /^https?:/i.test(i.url) && !i.temporary && !SL.isManifest(i.url) && !SL.isImageUrl(i.url));
@@ -1156,7 +1169,7 @@
 
   async function oneClickSaveVideo(item, button) {
     const setLabel = text => { if (button) button.textContent = text; };
-    if (item && (item.type === 'image' || item.type === 'svg' || SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url || ''))) {
+    if (item && !item.kind && (item.type === 'image' || item.type === 'svg' || SL.isImageUrl(item.url) || SL.PHOTO_EXT.test(item.url || ''))) {
       saveItem(item);
       setLabel('이미지 저장');
       captureHud('이미지로 저장했습니다');
@@ -1164,88 +1177,248 @@
       return { ok: true, mode: 'image' };
     }
     if (state.recorder) {
-      try { state.recorder.stop(); } catch { /* ignore */ }
-      setLabel('저장 중…');
+      stopRecording(true);
       return { ok: true, mode: 'stop' };
     }
     document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now'));
-    await new Promise(r => setTimeout(r, 400));
-    const file = (item?.type === 'video' && /^https?:/i.test(item.url) && !item.temporary && !SL.isManifest(item.url) && !SL.isImageUrl(item.url))
-      ? item
-      : directVideoItem();
-    if (file) {
-      saveItem(file);
-      setLabel('파일 저장 시작');
-      captureHud('원본 주소로 저장했습니다');
-      setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 1800);
-      return { ok: true, mode: 'file' };
-    }
-    const blocked = ['instagram', 'facebook', 'tiktok'].includes(siteKind());
-    if (blocked) {
-      setLabel('녹화 불가');
-      captureHud('이 사이트는 브라우저 녹화가 막혀 있습니다. 이미지는 「저장」을 누르세요.');
-      setTimeout(() => captureHud(''), 2800);
-      return { ok: false, error: '인스타/페북/틱톡은 원본 주소가 있을 때만 저장됩니다. 사진이면 저장 버튼을 쓰세요.' };
-    }
-    const video = item?.element?.tagName === 'VIDEO' ? item.element : pickCaptureVideo(item);
-    if (!video || !video.videoWidth) {
+    await new Promise(r => setTimeout(r, 350));
+    if (!VF) return { ok: false, error: '영상 모듈을 불러오지 못했습니다. 페이지를 새로고침해 주세요.' };
+    const items = refreshVideoItems();
+    const video = item?.element?.tagName === 'VIDEO' ? item.element : null;
+    const target = item?.kind ? item : VF.best(items, video);
+    if (!target) {
       setLabel('영상 없음');
       captureHud('재생할 영상을 먼저 열어 주세요');
-      setTimeout(() => { captureHud(''); setLabel('원클릭 저장'); }, 2000);
-      return { ok: false, error: '페이지에 영상이 없습니다. 영상을 연 다음 다시 눌러 주세요.' };
+      setTimeout(() => captureHud(''), 2200);
+      return { ok: false, error: '페이지에서 영상을 찾지 못했습니다. 영상을 한 번 재생한 뒤 다시 눌러 주세요.' };
     }
-    const src = video.currentSrc || video.src || '';
-    if (/^blob:/i.test(src)) {
-      try {
-        const blob = await fetch(src).then(r => r.blob());
-        if (blob && blob.size > 80_000) {
-          downloadBlob(blob, `video-${Date.now()}.webm`);
-          setLabel('저장됨');
-          return { ok: true, mode: 'blob' };
-        }
-      } catch { /* MSE — record */ }
-    }
-    const stream = video.captureStream?.() || video.mozCaptureStream?.();
-    if (!stream || !stream.getVideoTracks().length) {
-      setLabel('녹화 불가');
-      return { ok: false, error: '이 플레이어는 브라우저 녹화가 막혀 있습니다.' };
-    }
-    const live = !Number.isFinite(video.duration) || video.duration > 4 * 3600;
-    if (!live && video.currentTime > 1) {
-      try { video.currentTime = 0; } catch { /* ignore */ }
-    }
-    try { await video.play(); } catch { /* ignore */ }
-    const mime = ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm']
-      .find(type => MediaRecorder.isTypeSupported(type)) || '';
-    const chunks = [];
-    const rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000 } : undefined);
-    const onEnded = () => { try { rec.stop(); } catch { /* ignore */ } };
-    rec.ondataavailable = ev => { if (ev.data && ev.data.size) chunks.push(ev.data); };
-    rec.onstop = () => {
-      video.removeEventListener('ended', onEnded);
-      clearInterval(state.captureTimer);
-      state.recorder = null;
-      const blob = new Blob(chunks, { type: rec.mimeType || 'video/webm' });
-      const tooSmall = blob.size < 80_000;
-      captureHud(tooSmall ? '녹화 파일이 비어 있습니다. 이 사이트는 녹화가 막혀 있습니다.' : '저장했습니다');
-      setLabel('원클릭 저장');
-      setTimeout(() => captureHud(''), 2800);
-      if (tooSmall) return;
-      downloadBlob(blob, `capture-${Date.now()}.webm`);
-    };
-    video.addEventListener('ended', onEnded);
-    rec.start(500);
-    state.recorder = rec;
-    state.captureTimer = setInterval(() => {
-      const d = video.duration;
-      const t = video.currentTime;
-      const pct = Number.isFinite(d) && d > 0 ? Math.round((t / d) * 100) : 0;
-      captureHud(live ? `녹화 중 ${fmtClock(t)} · 클릭하면 저장` : `자동 저장 ${fmtClock(t)} / ${fmtClock(d)} (${pct}%)`);
-      setLabel(live ? '지금 저장' : `${pct}%`);
-    }, 400);
-    return { ok: true, mode: live ? 'live' : 'record' };
+    return saveVideo(target, button);
   }
 
+  /** Saves one video item using the right method for its kind. */
+  async function saveVideo(item, button) {
+    const setLabel = text => { if (button) button.textContent = text; };
+    if (item.kind === 'drm') {
+      toast(item.note || 'DRM 보호 영상이라 저장할 수 없습니다.', 'error');
+      return { ok: false, mode: 'drm', error: item.note || 'DRM 보호 영상이라 저장할 수 없습니다.' };
+    }
+    if (item.kind === 'direct') {
+      setLabel('저장 시작…');
+      const res = await VF.downloadDirect(item);
+      if (res?.ok) {
+        toast(`원본 영상 저장을 시작했습니다 · ${item.file || ''}`);
+        setLabel('저장됨 ✓');
+        return { ok: true, mode: 'file', file: item.file };
+      }
+      // The file URL was refused (expired / blocked): try the next-best method for the same video.
+      const items = refreshVideoItems();
+      const alt = items.find(i => i !== item && i.group && i.group === item.group && (i.kind === 'dash' || (i.kind === 'direct' && i.url !== item.url)));
+      if (alt) { toast('원본 주소가 거절되어 다른 방법으로 다시 시도합니다'); return saveVideo(alt, button); }
+      setLabel('실패');
+      const msg = `원본 주소가 거절됐습니다 (${res?.error || '알 수 없음'}). 페이지를 새로고침하고 영상을 다시 재생한 뒤 시도하거나 「녹화」를 쓰세요.`;
+      toast(msg, 'error');
+      return { ok: false, mode: 'file', error: msg };
+    }
+    if (item.kind === 'dash' || item.kind === 'hls') {
+      setLabel('새 탭에서 받는 중…');
+      const res = await VF.startJob(item);
+      if (res?.ok) {
+        toast('새 탭에서 영상을 받아 하나의 MP4로 합칩니다. 끝나면 자동 저장됩니다.');
+        return { ok: true, mode: 'stream' };
+      }
+      toast(`스트림 저장을 시작하지 못했습니다: ${res?.error || ''}`, 'error');
+      return { ok: false, mode: 'stream', error: res?.error || '' };
+    }
+    const video = item.element?.isConnected ? item.element : (item.vid ? VF.videoByVid(item.vid) : null) || pickCaptureVideo(item);
+    return startRecording(video, button);
+  }
+
+  // ------------------------------------------------------------------ recording (fallback for SABR/MSE players)
+  function recorderMime() {
+    const prefs = [
+      ['video/mp4;codecs=avc1.640028,mp4a.40.2', 'mp4'], ['video/mp4;codecs=avc1,mp4a.40.2', 'mp4'], ['video/mp4;codecs=avc1,opus', 'mp4'],
+      ['video/webm;codecs=vp9,opus', 'webm'], ['video/webm;codecs=vp8,opus', 'webm'], ['video/webm', 'webm'], ['video/mp4', 'mp4']
+    ];
+    return prefs.find(([type]) => { try { return MediaRecorder.isTypeSupported(type); } catch { return false; } }) || ['', 'webm'];
+  }
+
+  function captureHud(text, opts = {}) {
+    let hud = uiRoot().querySelector('.sl-capture-hud');
+    if (!text) { hud?.remove(); return; }
+    if (!hud) {
+      hud = document.createElement('div');
+      hud.className = 'sl-capture-hud';
+      hud.setAttribute('role', 'status');
+      hud.innerHTML = '<span class="sl-hud-text"></span><button type="button" class="sl-hud-save">지금 저장</button><button type="button" class="sl-hud-cancel">취소</button>';
+      hud.querySelector('.sl-hud-save').onclick = ev => { ev.stopPropagation(); stopRecording(true); };
+      hud.querySelector('.sl-hud-cancel').onclick = ev => { ev.stopPropagation(); stopRecording(false); };
+      uiRoot().append(hud);
+    }
+    hud.querySelector('.sl-hud-text').textContent = text;
+    hud.classList.toggle('is-recording', !!opts.recording);
+  }
+
+  function stopRecording(keep) {
+    const rec = state.recorder;
+    if (!rec) return;
+    rec.__keep = keep;
+    try { rec.stop(); } catch { /* ignore */ }
+  }
+
+  async function startRecording(video, button) {
+    const setLabel = text => { if (button) button.textContent = text; };
+    if (!video || !(video.videoWidth || video.readyState)) {
+      captureHud('재생할 영상을 먼저 열어 주세요');
+      setTimeout(() => captureHud(''), 2200);
+      return { ok: false, mode: 'record', error: '녹화할 영상이 없습니다. 영상을 재생한 뒤 다시 눌러 주세요.' };
+    }
+    if (VF?.isDrm(video)) {
+      const msg = 'DRM 보호 영상이라 녹화해도 검은 화면만 저장됩니다. 저장할 수 없습니다.';
+      toast(msg, 'error');
+      return { ok: false, mode: 'drm', error: msg };
+    }
+    let stream = null;
+    try { stream = video.captureStream?.() || video.mozCaptureStream?.(); } catch (e) {
+      const msg = /cross-origin|insecure|security/i.test(String(e)) ? '다른 사이트 영상이라 브라우저가 녹화를 막았습니다.' : `녹화를 시작하지 못했습니다: ${e.message || e}`;
+      toast(msg, 'error');
+      return { ok: false, mode: 'record', error: msg };
+    }
+    if (!stream) return { ok: false, mode: 'record', error: '이 브라우저는 영상 녹화를 지원하지 않습니다.' };
+    const live = !Number.isFinite(video.duration) || video.duration > 4 * 3600;
+    if (!live && video.currentTime > 1 && video.duration - video.currentTime > 2) {
+      try { video.currentTime = 0; } catch { /* ignore */ }
+    }
+    const wasLoop = video.loop;
+    video.loop = false;
+    try { await video.play(); } catch { /* ignore */ }
+    // Tracks appear once playback really starts.
+    for (let i = 0; i < 20 && !stream.getVideoTracks().length; i++) await new Promise(r => setTimeout(r, 100));
+    if (!stream.getVideoTracks().length) {
+      video.loop = wasLoop;
+      return { ok: false, mode: 'record', error: '영상 화면을 가져오지 못했습니다. 영상을 재생한 뒤 다시 눌러 주세요.' };
+    }
+    const [mime, ext] = recorderMime();
+    const chunks = [];
+    let rec;
+    try {
+      rec = new MediaRecorder(stream, mime ? { mimeType: mime, videoBitsPerSecond: 8_000_000, audioBitsPerSecond: 192_000 } : undefined);
+    } catch (e) {
+      video.loop = wasLoop;
+      return { ok: false, mode: 'record', error: `녹화를 시작하지 못했습니다: ${e.message || e}` };
+    }
+    rec.__keep = true;
+    let lastT = video.currentTime;
+    let maxT = 0;
+    const onEnded = () => stopRecording(true);
+    const onTime = () => {
+      // Players that loop by seeking back to 0 (Instagram/Facebook reels) never fire "ended".
+      if (!live && maxT > 1 && video.currentTime + 0.5 < lastT && lastT > video.duration - 1.5) stopRecording(true);
+      lastT = video.currentTime;
+      maxT = Math.max(maxT, lastT);
+    };
+    rec.ondataavailable = ev => { if (ev.data && ev.data.size) chunks.push(ev.data); };
+    rec.onstop = async () => {
+      video.removeEventListener('ended', onEnded);
+      video.removeEventListener('timeupdate', onTime);
+      video.loop = wasLoop;
+      clearInterval(state.captureTimer);
+      state.recorder = null;
+      state.lastRecording = null;
+      if (!rec.__keep) { captureHud('녹화를 취소했습니다'); setTimeout(() => captureHud(''), 1600); setLabel('녹화'); return; }
+      let blob = new Blob(chunks, { type: (rec.mimeType || mime || 'video/webm').split(';')[0] });
+      if (blob.size < 50_000) {
+        captureHud('녹화 파일이 비어 있습니다. 이 플레이어는 녹화가 막혀 있을 수 있습니다.');
+        setTimeout(() => captureHud(''), 3200);
+        state.lastRecording = { ok: false, size: blob.size };
+        return;
+      }
+      if (ext === 'mp4' && MT) {
+        // MediaRecorder writes fragmented MP4 without a proper duration; rewrite it as a normal, seekable MP4.
+        try {
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          const parsed = MT.parseInit(bytes);
+          MT.parseFragments(bytes, parsed);
+          const tracks = MT.alignTracks(MT.fmp4ToTracks(parsed));
+          if (tracks.length) blob = new Blob(MT.writeMp4(tracks), { type: 'video/mp4' });
+        } catch (e) { console.warn('[Source Lens] mp4 rewrite skipped', e); }
+      }
+      const name = VF.fileName({ title: VF.title(), quality: video.videoHeight ? `${Math.min(video.videoWidth, video.videoHeight)}p-녹화` : '녹화' }, ext);
+      state.lastRecording = { ok: true, size: blob.size, mime: blob.type, name };
+      captureHud(`저장 중… (${(blob.size / 1048576).toFixed(1)}MB)`);
+      const finish = ok => {
+        captureHud(ok ? `녹화 영상을 저장했습니다 · ${name}` : '저장하지 못했습니다');
+        setLabel(ok ? '저장됨 ✓' : '실패');
+        setTimeout(() => captureHud(''), 3200);
+      };
+      if (blob.size <= 24 * 1048576) downloadBlob(blob, name, ok => finish(ok !== false));
+      else {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = name;
+        (state.shadow || document.documentElement).append(a);
+        a.click(); a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 60_000);
+        finish(true);
+      }
+    };
+    video.addEventListener('ended', onEnded);
+    video.addEventListener('timeupdate', onTime);
+    rec.start(1000);
+    state.recorder = rec;
+    const started = Date.now();
+    const tick = () => {
+      const d = video.duration;
+      const t = video.currentTime;
+      const pct = Number.isFinite(d) && d > 0 ? Math.min(100, Math.round((t / d) * 100)) : 0;
+      const warn = document.hidden ? ' · ⚠ 이 탭으로 돌아와 주세요' : ' · 탭을 열어 두세요';
+      captureHud(live ? `● 녹화 중 ${fmtClock((Date.now() - started) / 1000)}${warn}` : `● 녹화 중 ${fmtClock(t)} / ${fmtClock(d)} (${pct}%) · 끝나면 자동 저장${warn}`, { recording: true });
+      setLabel(live ? '녹화 중' : `녹화 ${pct}%`);
+      if (video.paused && !video.ended && Date.now() - started > 1500) video.play().catch(() => {});
+    };
+    tick();
+    state.captureTimer = setInterval(tick, 500);
+    toast(live ? '라이브 녹화를 시작했습니다. 아래 「지금 저장」을 누르면 저장됩니다.' : '녹화를 시작했습니다. 영상이 끝나면 자동으로 저장됩니다.');
+    return { ok: true, mode: live ? 'live' : 'record', mime: rec.mimeType || mime };
+  }
+
+  function videoRow(item) {
+    const row = document.createElement('article');
+    row.className = `sl-vrow is-${item.kind}${item.playing ? ' is-playing' : ''}`;
+    const head = document.createElement('div');
+    head.className = 'sl-vhead';
+    const badge = document.createElement('span');
+    badge.className = `sl-vbadge k-${item.kind}`;
+    badge.textContent = item.badge || item.kind;
+    head.append(badge);
+    const facts = [item.quality, item.codec, item.audio === true ? '소리 포함' : item.audio === false ? '소리 없음' : '', item.duration ? fmtClock(item.duration) : '', item.playing ? '지금 보는 영상' : ''].filter(Boolean);
+    const strong = document.createElement('strong');
+    strong.textContent = facts.join(' · ') || item.source || '';
+    head.append(strong);
+    row.append(head);
+    const note = document.createElement('p');
+    note.className = 'sl-vnote';
+    note.textContent = item.note || '';
+    row.append(note);
+    const src = document.createElement('small');
+    src.className = 'sl-meta';
+    src.textContent = item.source || '';
+    row.append(src);
+    const actions = document.createElement('div');
+    actions.className = 'sl-vactions';
+    const label = { direct: '저장', dash: '받아서 MP4로 저장', hls: '받아서 MP4로 저장', record: state.recorder ? '녹화 멈추고 저장' : '녹화해서 저장', drm: '저장 불가' }[item.kind];
+    const main = actionButton('primary', label, ev => {
+      ev.stopPropagation();
+      if (item.kind === 'record' && state.recorder) { stopRecording(true); return; }
+      saveVideo(item, ev.currentTarget);
+    });
+    if (item.kind === 'drm') main.disabled = true;
+    actions.append(main);
+    const url = liveUrl(item);
+    if (url) actions.append(actionButton('normal', '주소 복사', ev => { ev.stopPropagation(); copy(url, ev.currentTarget); }));
+    if (item.kind === 'direct') actions.append(actionButton('normal', '새 탭', ev => { ev.stopPropagation(); window.open(url, '_blank', 'noopener'); }));
+    row.append(actions);
+    return row;
+  }
 
   function bytesToBase64(buffer) {
     const bytes = new Uint8Array(buffer);
@@ -1372,7 +1545,11 @@
       downloadBlob(new Blob([item.code || svgSource(item)], { type: 'image/svg+xml' }), name, finish);
       return;
     }
-    if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url || ''))) {
+    if (item.kind) {
+      saveVideo(item).then(r => done?.(!!r?.ok, r?.error));
+      return;
+    }
+    if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url || '') || /googlevideo|videoplayback/.test(item.url || ''))) {
       oneClickSaveVideo(item).then(r => finish(!!r?.ok, r?.error));
       return;
     }
@@ -1754,7 +1931,11 @@
       const picked = state.picked || state.candidates[0];
       return picked ? [picked] : [];
     }
-    if (tab === 'video' && videoLocked()) return [];
+    if (tab === 'video') {
+      const q = state.query.trim().toLowerCase();
+      const list = state.videoItems || [];
+      return q ? list.filter(i => `${i.note} ${i.source} ${i.quality} ${i.badge} ${i.url || ''}`.toLowerCase().includes(q)) : list;
+    }
     let list = state.candidates.filter(item => item.type === tab);
     if (tab === 'image' && state.minPx) list = list.filter(item => itemPixel(item) >= state.minPx);
     const q = state.query.trim().toLowerCase();
@@ -1780,6 +1961,7 @@
 
   function render() {
     closePanel();
+    refreshVideoItems();
     const shadow = uiRoot();
     const root = document.createElement('div');
     root.id = 'sl-root';
@@ -1824,8 +2006,7 @@
     const updateCounts = () => {
       panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
       const videoBtn = panel.querySelector('[data-tab="video"]');
-      if (videoLocked()) videoBtn.innerHTML = '영상 <b>불가</b>';
-      else videoBtn.innerHTML = `영상 <b>${state.candidates.filter(i => i.type === 'video').length}</b>`;
+      videoBtn.innerHTML = `영상 <b>${(state.videoItems || []).filter(i => i.kind !== 'drm').length}</b>`;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
     };
 
@@ -1848,6 +2029,7 @@
     };
 
     const makeTile = item => {
+      if (item.kind) return videoRow(item);
       const tile = document.createElement('article');
       tile.className = 'sl-tile';
       const key = itemKey(item);
@@ -1919,10 +2101,21 @@
         return;
       }
       grid = document.createElement('div');
-      grid.className = 'sl-grid';
+      grid.className = state.activeTab === 'video' ? 'sl-vlist' : 'sl-grid';
+      if (state.activeTab === 'video') {
+        const help = document.createElement('p');
+        help.className = 'sl-vhelp';
+        help.textContent = '위에 있는 것부터 추천 순서입니다. 「원본 파일」이 가장 빠르고, 「DASH/HLS → MP4」는 새 탭에서 조각을 받아 하나로 합칩니다. 「녹화」는 다른 방법이 없을 때 재생하면서 저장합니다.';
+        grid.append(help);
+      }
       list.forEach(item => grid.append(makeTile(item)));
       main.append(grid);
       updateBulk();
+    };
+
+    state.updateVideoTab = () => {
+      updateCounts();
+      if (state.activeTab === 'video') renderGrid();
     };
 
     const drawTools = () => {
@@ -2006,6 +2199,7 @@
         updateBulk();
       };
       const zipBtn = mk('sl-act-zip', false);
+      if (state.activeTab === 'video') zipBtn.hidden = true;
       zipBtn.title = `한 파일로 묶어 저장 (최대 ${ZIP_MAX}개)`;
       zipBtn.onclick = () => {
         const targets = bulkTargets(visibleList());
@@ -2236,7 +2430,11 @@
     }
     render();
     requestFrameMedia();
-    if (clickedVideo && state.picked?.type === 'video' && state.autoVideo) oneClickSaveVideo(state.picked);
+    if (clickedVideo && state.autoVideo && VF && !state.recorder) {
+      // Alt+click on a video: save right away when a real file/stream exists; recording always needs an explicit click.
+      const best = VF.best(refreshVideoItems(), collected.media);
+      if (best && (best.kind === 'direct' || best.kind === 'dash' || best.kind === 'hls')) saveVideo(best);
+    }
   }
 
   const fromOurUi = ev => ev.target === state.host || !!ev.target?.closest?.('#sl-host');
@@ -2364,6 +2562,16 @@
     if (message?.type === 'oneClickVideo') {
       if (window !== window.top) return;
       oneClickSaveVideo(null, null).then(sendResponse);
+      return true;
+    }
+    if (message?.type === 'recordVideo') {
+      if (state.recorder) { stopRecording(true); sendResponse({ ok: true, mode: 'stop' }); return true; }
+      const video = VF?.videoByVid(message.vid) || pickCaptureVideo(null);
+      startRecording(video, null).then(sendResponse);
+      return true;
+    }
+    if (message?.type === 'recordingState') {
+      sendResponse({ recording: !!state.recorder, last: state.lastRecording || null });
       return true;
     }
     if (message?.type !== 'contextInspect') return;

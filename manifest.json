@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "Source Lens",
-  "version": "1.0.1",
-  "description": "페이지에서 이미지·영상·SVG의 실제 리소스 URL을 찾고, 만료·세션 제약을 설명한 뒤 저장합니다.",
+  "version": "1.1.0",
+  "description": "페이지의 이미지·영상·SVG 원본을 찾아 저장합니다. 인스타·페북 원본 영상, HLS/DASH 스트림 합치기, 유튜브 녹화 저장 지원.",
   "permissions": [
     "contextMenus",
     "webRequest",
@@ -47,7 +47,7 @@
     },
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["shared.js", "platform-profiles.js", "content.js"],
+      "js": ["shared.js", "platform-profiles.js", "media-tools.js", "video-finder.js", "content.js"],
       "run_at": "document_start",
       "all_frames": true
     }
