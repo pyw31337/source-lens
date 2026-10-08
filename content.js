@@ -7,8 +7,111 @@
     panel: null, selected: null, contextTarget: null, selectedMedia: null, picked: null,
     candidates: [], activeTab: 'selected', postUrl: '', capture: null, pageNet: [],
     profile: null, observer: null, scanTimer: 0, redraw: null, platformMedia: [],
-    filterLarge: false, recorder: null, captureTimer: 0
+    recorder: null, captureTimer: 0,
+    query: '', minPx: 0, sort: 'big', selectedKeys: new Set(), dock: 'right', altClick: true,
+    lastPoint: null, lightboxItem: null, toastTimer: 0, autoVideo: true
   };
+  const VERSION = (() => { try { return chrome.runtime.getManifest().version; } catch { return ''; } })();
+  const SAVE_MAX = 100;
+  const ZIP_MAX = 40;
+
+  function loadPrefs() {
+    try {
+      chrome.storage.local.get('slPrefs', data => {
+        const p = data?.slPrefs || {};
+        if (p.dock === 'left' || p.dock === 'right') state.dock = p.dock;
+        if (Number.isFinite(p.minPx)) state.minPx = p.minPx;
+        if (p.sort === 'big' || p.sort === 'page') state.sort = p.sort;
+        state.altClick = p.altClick !== false;
+        state.autoVideo = p.autoVideo !== false;
+      });
+      chrome.storage.onChanged?.addListener((changes, area) => {
+        if (area !== 'local' || !changes.slPrefs) return;
+        const p = changes.slPrefs.newValue || {};
+        state.altClick = p.altClick !== false;
+        state.autoVideo = p.autoVideo !== false;
+        if (p.dock === 'left' || p.dock === 'right') {
+          state.dock = p.dock;
+          state.panel?.querySelector('#sl-panel')?.classList.toggle('is-left', state.dock === 'left');
+        }
+      });
+    } catch { /* ignore */ }
+  }
+
+  function savePrefs(patch) {
+    try {
+      chrome.storage.local.get('slPrefs', data => {
+        chrome.storage.local.set({ slPrefs: { ...(data?.slPrefs || {}), ...patch } });
+      });
+    } catch { /* ignore */ }
+  }
+  loadPrefs();
+
+  let shadowCache = { t: 0, roots: [] };
+  function shadowRoots() {
+    const now = Date.now();
+    if (now - shadowCache.t < 1500) return shadowCache.roots;
+    const roots = [];
+    const walk = (root, depth) => {
+      if (!root || depth > 6) return;
+      const tw = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
+      let node, n = 0;
+      while ((node = tw.nextNode()) && n < 40000) {
+        n += 1;
+        const sr = node.shadowRoot;
+        if (sr && node !== state.host && node.id !== 'sl-host') {
+          roots.push(sr);
+          walk(sr, depth + 1);
+        }
+      }
+    };
+    try { walk(document.documentElement, 0); } catch { /* ignore */ }
+    shadowCache = { t: now, roots };
+    return roots;
+  }
+
+  function deepAll(selector) {
+    const out = [...document.querySelectorAll(selector)];
+    shadowRoots().forEach(root => {
+      try { out.push(...root.querySelectorAll(selector)); } catch { /* ignore */ }
+    });
+    return out.filter(node => !node.closest?.('#sl-host'));
+  }
+
+  let bgCache = { t: 0, items: [] };
+  function collectBackgrounds() {
+    const now = Date.now();
+    if (now - bgCache.t < 3000) return bgCache.items;
+    const out = [];
+    const seen = new Set();
+    const start = performance.now();
+    const all = document.body ? document.body.getElementsByTagName('*') : [];
+    const n = Math.min(all.length, 8000);
+    for (let i = 0; i < n; i++) {
+      if ((i & 63) === 0 && performance.now() - start > 50) break;
+      const el = all[i];
+      if (el.id === 'sl-host' || /^(?:IMG|VIDEO|PICTURE|SOURCE|SCRIPT|STYLE|LINK|META|NOSCRIPT|BR)$/i.test(el.tagName) || el instanceof SVGElement) continue;
+      const bg = getComputedStyle(el).backgroundImage;
+      if (!bg || bg === 'none' || bg.indexOf('url(') < 0) continue;
+      const r = el.getBoundingClientRect();
+      if (r.width < 96 || r.height < 96) continue;
+      const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/g;
+      let m;
+      while ((m = re.exec(bg))) {
+        const u = abs(m[1]);
+        if (!u || seen.has(u) || /^data:/i.test(u) || /\.svg(?:$|[?#])/i.test(u)) continue;
+        seen.add(u);
+        if (isChromeImage(el, u)) continue;
+        const item = candidate(u, '배경 이미지(CSS)', 'image', {
+          confidence: '중간', relation: 'page', width: Math.round(r.width), height: Math.round(r.height)
+        });
+        if (item) out.push(item);
+      }
+      if (out.length >= 80) break;
+    }
+    bgCache = { t: now, items: out };
+    return out;
+  }
 
   const $ = (sel, root = document) => root.querySelector(sel);
   const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
@@ -106,10 +209,14 @@
     let value = abs(url);
     if (!value) return null;
     if (typeof SL.unwrapMediaUrl === 'function') value = abs(SL.unwrapMediaUrl(value)) || value;
-    if (SL.isUiJunk(value) && hint !== 'svg') return null;
+    if (SL.isUiJunk(value) && hint !== 'svg' && !extra.allowJunk) return null;
+    let rewritten = false;
     if (hint !== 'svg' && hint !== 'video' && typeof SL.upgradeMediaUrl === 'function') {
       const upgraded = SL.upgradeMediaUrl(value);
-      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded) || /pstatic\.net|unsplash|pexels|coupangcdn|danawa/i.test(upgraded))) value = upgraded;
+      if (upgraded && upgraded !== value && (SL.isImageUrl(upgraded) || SL.PHOTO_EXT.test(upgraded) || /pstatic\.net|unsplash|pexels|coupangcdn|danawa/i.test(upgraded))) {
+        value = upgraded;
+        rewritten = true;
+      }
     }
     const info = SL.classifyUrl(value, hint);
     if (SL.PHOTO_EXT.test(value) || SL.isImageUrl(value)) info.type = 'image';
@@ -126,7 +233,8 @@
       mime: extra.mime || '',
       name: extra.name || '',
       fp: extra.fp || '',
-      relation: extra.relation || 'target'
+      relation: extra.relation || 'target',
+      rewritten
     };
   }
 
@@ -244,16 +352,12 @@
   }
 
   function largestSrcset(srcset) {
-    let best = '', score = -1;
-    String(srcset || '').split(',').forEach(part => {
-      const bits = part.trim().split(/\s+/);
-      const url = bits[0];
-      if (!url) return;
-      const desc = bits[1] || '';
-      const n = parseFloat(desc) || 1;
-      if (n >= score) { score = n; best = url; }
-    });
-    return best;
+    return SL.largestSrcset(srcset);
+  }
+
+  function srcsetWidth(srcset, url) {
+    const hit = SL.parseSrcset(srcset).find(c => c.url === url);
+    return hit && hit.unit === 'w' ? Math.round(hit.value) : 0;
   }
 
   function isLightPaint(value) {
@@ -326,12 +430,18 @@
   function collectImgLike(node, out, media) {
     const display = node.currentSrc || node.src || '';
     const best = largestSrcset(node.srcset || node.getAttribute('srcset') || '');
-    const pick = (best && itemPixel({ url: abs(best) }) > itemPixel({ url: abs(display) })) ? best : display;
+    const bestW = best ? srcsetWidth(node.srcset || node.getAttribute('srcset') || '', best) : 0;
+    const displayPx = Math.max(node.naturalWidth || 0, node.naturalHeight || 0, itemPixel({ url: abs(display) }));
+    const pick = best && (bestW > displayPx || itemPixel({ url: abs(best) }) > displayPx || !display) ? best : display;
     if (pick) {
       out.push(candidate(pick, pick === best ? 'srcset 최대' : 'img.currentSrc', 'image', {
-        element: media, confidence: '최상'
+        element: media, confidence: '최상', allowJunk: true,
+        width: pick === best && bestW ? bestW : 0,
+        height: pick === best && bestW && node.naturalWidth ? Math.round(bestW * node.naturalHeight / node.naturalWidth) : 0
       }));
     }
+    const lazySet = largestSrcset(node.getAttribute('data-srcset') || '');
+    if (lazySet) out.push(candidate(lazySet, '속성:data-srcset', 'image', { element: media, confidence: '높음' }));
     ['data-src', 'data-original', 'data-full', 'data-full-url', 'data-lazy-src', 'data-zoom-image',
       'data-origin', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'data-lazy', 'org_src'].forEach(attr => {
       out.push(candidate(node.getAttribute(attr), `속성:${attr}`, 'image', { element: media, confidence: '중간' }));
@@ -348,11 +458,14 @@
       let cur = target;
       for (let i = 0; i < 6 && cur; i++) {
         const bg = getComputedStyle(cur).backgroundImage || '';
-        const match = /url\(["']?(https?:[^"')]+)["']?\)/.exec(bg);
-        if (match && SL.isImageUrl(match[1]) && !isChromeImage(cur, match[1])) {
-          out.push(candidate(match[1], '배경 이미지', 'image', { confidence: '최상' }));
-          return { media: cur, candidates: out.filter(Boolean) };
+        const re = /url\(\s*["']?([^"')]+?)["']?\s*\)/g;
+        let match;
+        while ((match = re.exec(bg))) {
+          const u = abs(match[1]);
+          if (!u || (/^data:/i.test(u) && !/^data:image\/svg/i.test(u)) || isChromeImage(cur, u)) continue;
+          out.push(candidate(u, '배경 이미지', /\.svg(?:$|[?#])|^data:image\/svg/i.test(u) ? 'svg' : 'image', { confidence: '최상', element: cur }));
         }
+        if (out.filter(Boolean).length) return { media: cur, candidates: out.filter(Boolean) };
         cur = cur.parentElement;
       }
       return { media: null, candidates: out };
@@ -494,6 +607,16 @@
     }
   }
 
+  const svgCache = new WeakMap();
+  function cachedSvgCandidate(svg, source, confidence, extra) {
+    const hit = svgCache.get(svg);
+    const sig = `${svg.childElementCount}:${svg.attributes.length}`;
+    if (hit && hit.sig === sig && Date.now() - hit.t < 15000) return hit.item;
+    const item = svgCandidate(svg, source, confidence, extra);
+    svgCache.set(svg, { t: Date.now(), sig, item });
+    return item;
+  }
+
   function svgCandidate(svg, source, confidence, extra = {}) {
     if (!svg || svg.closest?.('#sl-host')) return null;
     const r = svg.getBoundingClientRect();
@@ -524,16 +647,16 @@
   function collectPageSvgs() {
     const out = [];
     const seen = new Set();
-    $$('svg').forEach(svg => {
-      if (svg.closest('#sl-host')) return;
-      const item = svgCandidate(svg, svg.getAttribute('aria-label') || '페이지 SVG', '중간', { keepUi: true, allowTiny: true });
+    deepAll('svg').forEach(svg => {
+      if (svg.parentElement?.closest?.('svg')) return;
+      const item = cachedSvgCandidate(svg, svg.getAttribute('aria-label') || '페이지 SVG', '중간', { keepUi: true, allowTiny: true });
       if (!item) return;
       const key = item.fp || item.name || item.url;
       if (seen.has(key)) return;
       seen.add(key);
       out.push(item);
     });
-    $$('img, object, embed').forEach(node => {
+    deepAll('img, object, embed').forEach(node => {
       const url = abs(node.currentSrc || node.src || node.getAttribute?.('src') || node.getAttribute?.('data') || '');
       if (!url || !/\.svg(?:$|[?#])/i.test(url) || node.closest?.('#sl-host')) return;
       if (isUiSvg(node, url, fileName(url))) return;
@@ -571,31 +694,44 @@
     return Promise.resolve([]);
   }
 
-  function listPageMedia() {
-    const images = $$('img').slice(0, 200).map(img => {
-      const url = abs(img.currentSrc || img.src);
-      if (!url || SL.isUiJunk(url) || !SL.isImageUrl(url)) return null;
-      const w = img.naturalWidth || img.width || 0;
-      const h = img.naturalHeight || img.height || 0;
-      if (w && h && w < 80 && h < 80) return null;
-      return { url, source: '페이지 이미지', type: 'image', width: w, height: h, name: fileName(url), state: SL.classifyUrl(url).state };
-    }).filter(Boolean);
-    const videos = $$('video').slice(0, 40).map(video => {
-      const url = abs(video.currentSrc || video.src);
-      if (url && SL.isImageUrl(url)) return null;
-      return {
-        url: url || location.href,
-        source: '페이지 영상',
-        type: 'video',
-        width: video.videoWidth || 0,
-        height: video.videoHeight || 0,
-        name: fileName(url || 'video'),
-        state: url ? SL.classifyUrl(url).state : '세션 종속 (blob)',
-        temporary: !url || /^blob:/i.test(url)
-      };
-    }).filter(Boolean);
-    return { images, videos };
+  function plainItem(item) {
+    if (!item?.url) return null;
+    const code = item.type === 'svg' ? (item.code || svgSource(item) || '') : '';
+    if (item.type === 'svg' && /^data:/i.test(item.url) && item.url.length > 200000) return null;
+    const url = item.temporary ? item.url : liveUrl(item);
+    return {
+      url,
+      type: item.type,
+      source: item.source || '',
+      name: labelOf(item),
+      file: SL.downloadName({ ...item, url }, location.hostname),
+      width: item.width || 0,
+      height: item.height || 0,
+      px: itemPixel(item),
+      state: item.state || '',
+      temporary: !!item.temporary,
+      stream: !!item.stream,
+      signed: (item.flags || []).includes('signed'),
+      code: code.length < 120000 ? code : ''
+    };
   }
+
+  function listPageMedia() {
+    try { document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now')); } catch { /* ignore */ }
+    const all = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
+      .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)))
+      .map(plainItem).filter(Boolean);
+    return {
+      images: all.filter(i => i.type === 'image'),
+      videos: all.filter(i => i.type === 'video'),
+      svgs: all.filter(i => i.type === 'svg'),
+      host: location.hostname,
+      title: document.title,
+      top: window === window.top,
+      videoLocked: videoLocked()
+    };
+  }
+  window.__sourceLensList = listPageMedia;
 
   function itemKey(item) {
     if (item.type === 'svg') return `svg:${item.fp || item.name || item.url}`;
@@ -641,18 +777,25 @@
     state.observer = null;
     if (state.scanTimer) clearInterval(state.scanTimer);
     state.scanTimer = 0;
+    if (state.onScroll) window.removeEventListener('scroll', state.onScroll, true);
+    state.onScroll = null;
     if (state.onMediaLoad) document.removeEventListener('load', state.onMediaLoad, true);
     state.onMediaLoad = null;
     state.redraw = null;
     state.shadow?.querySelectorAll?.('#sl-root, .sl-lightbox, .sl-slice-editor')?.forEach(n => n.remove());
     state.panel = null;
+    state.lightboxItem = null;
     state.selected?.classList?.remove('sl-select');
   }
 
   function pageImageItem(img) {
     if (!img || img.closest?.('#sl-host')) return null;
     const url = abs(img.currentSrc || img.src);
-    if (!url || SL.isUiJunk(url) || !SL.isImageUrl(url)) return null;
+    if (!url || /\.svg(?:$|[?#])|^data:image\/svg/i.test(url)) return null;
+    const loaded = img.complete && img.naturalWidth > 0;
+    const gif = /\.gif(?:$|[?#])/i.test(url);
+    if (SL.isUiJunk(gif && loaded ? url.replace(/\.gif(?=$|[?#])/i, '.png') : url)) return null;
+    if (!SL.isImageUrl(url) && !loaded) return null;
     const r = img.getBoundingClientRect();
     const w = img.naturalWidth || img.width || r.width || 0;
     const h = img.naturalHeight || img.height || r.height || 0;
@@ -660,13 +803,13 @@
     if (isChromeImage(img, url)) return null;
     if (/s150x150|s320x320|_s\.(?:jpe?g|png|webp)/i.test(url) && Math.min(w, h) < 400) return null;
     return candidate(url, '페이지 이미지', 'image', {
-      element: img, confidence: '중간', width: img.naturalWidth || 0, height: img.naturalHeight || 0, relation: 'page'
+      element: img, confidence: '중간', width: img.naturalWidth || 0, height: img.naturalHeight || 0, relation: 'page', allowJunk: gif
     });
   }
 
   function collectPageMedia() {
-    const images = $$('img').map(pageImageItem).filter(Boolean);
-    const videos = $$('video').map(video => {
+    const images = deepAll('img').map(pageImageItem).filter(Boolean);
+    const videos = deepAll('video').map(video => {
       if (video.closest?.('#sl-host')) return null;
       const r = video.getBoundingClientRect();
       if (Math.min(r.width || 0, r.height || 0, video.videoWidth || r.width || 0) < 96) return null;
@@ -676,8 +819,21 @@
         element: video, confidence: '중간', width: video.videoWidth || 0, height: video.videoHeight || 0, relation: 'page'
       });
     }).filter(Boolean);
+    const sources = deepAll('video source[src]').map(source => {
+      const url = abs(source.src);
+      if (!url || SL.isImageUrl(url)) return null;
+      const video = source.closest('video');
+      return candidate(url, 'video.source', 'video', {
+        element: video, confidence: '높음', width: video?.videoWidth || 0, height: video?.videoHeight || 0, relation: 'page'
+      });
+    }).filter(Boolean);
+    const posters = deepAll('video[poster]').map(video => candidate(video.getAttribute('poster'), '영상 포스터', 'image', {
+      confidence: '중간', relation: 'page'
+    })).filter(Boolean);
     const svgs = collectPageSvgs();
-    return [...images, ...videos, ...svgs, ...collectCatalogMedia(), ...collectSiteExtras()];
+    let backgrounds = [];
+    try { backgrounds = collectBackgrounds(); } catch { /* ignore */ }
+    return [...images, ...videos, ...sources, ...posters, ...svgs, ...collectCatalogMedia(), ...backgrounds, ...collectSiteExtras()];
   }
 
   function collectSiteExtras() {
@@ -732,14 +888,26 @@
     };
     document.querySelector('meta[property="og:image"]')?.content && push(document.querySelector('meta[property="og:image"]').content, 'og:image', { confidence: '높음' });
     document.querySelector('meta[name="twitter:image"]')?.content && push(document.querySelector('meta[name="twitter:image"]').content, 'twitter:image', { confidence: '높음' });
-    $$('img, source').forEach(node => {
+    deepAll('img, source').forEach(node => {
+      if (node.tagName === 'SOURCE' && node.parentElement?.tagName === 'VIDEO') return;
       ['src', 'currentSrc', 'data-src', 'data-original', 'data-origin', 'data-zoom', 'data-zoom-image', 'data-lazy-src', 'data-url', 'data-image', 'data-img', 'data-orig-file', 'org_src'].forEach(attr => {
         const v = node[attr] || node.getAttribute?.(attr);
-        if (v) push(v, attr, { element: node.tagName === 'IMG' ? node : null, confidence: '중간' });
+        if (!v) return;
+        // Only trust the element's pixel size when this attribute is what is actually displayed
+        // (a lazy data-src next to a 1×1 placeholder must not be reported as 1×1).
+        const shown = node.tagName === 'IMG' && abs(v) === abs(node.currentSrc || node.src || '');
+        push(v, attr, {
+          element: shown ? node : null,
+          confidence: '중간', width: shown ? node.naturalWidth || 0 : 0, height: shown ? node.naturalHeight || 0 : 0
+        });
       });
-      const srcset = node.srcset || node.getAttribute?.('srcset') || '';
-      const best = largestSrcset(srcset);
-      if (best) push(best, 'srcset 최대', { confidence: '높음' });
+      ['srcset', 'data-srcset'].forEach(attr => {
+        const srcset = (attr === 'srcset' ? node.srcset : '') || node.getAttribute?.(attr) || '';
+        const best = largestSrcset(srcset);
+        const w = srcsetWidth(srcset, best);
+        const h = w && node.naturalWidth ? Math.round(w * node.naturalHeight / node.naturalWidth) : 0;
+        if (best) push(best, attr === 'srcset' ? 'srcset 최대' : 'data-srcset 최대', { confidence: '높음', width: w, height: h });
+      });
     });
     $$('[style*="background"]').slice(0, 80).forEach(node => {
       const bg = getComputedStyle(node).backgroundImage || '';
@@ -822,7 +990,11 @@
       const node = ev.target;
       if (!state.panel || !node?.tagName) return;
       if (node.tagName !== 'IMG' && node.tagName !== 'VIDEO' && node.tagName !== 'SVG') return;
-      if (mergePageMedia()) state.redraw?.();
+      if (state._loadSoon) return;
+      state._loadSoon = setTimeout(() => {
+        state._loadSoon = 0;
+        if (state.panel && mergePageMedia()) state.redraw?.();
+      }, 400);
     };
     document.addEventListener('load', state.onMediaLoad, true);
     state.observer = new MutationObserver(() => {
@@ -830,13 +1002,21 @@
       state._scanSoon = setTimeout(() => {
         state._scanSoon = 0;
         if (state.panel && mergePageMedia()) state.redraw?.();
-      }, 280);
+      }, 700);
     });
     state.observer.observe(document.documentElement, { childList: true, subtree: true });
+    // Lazy-loading pages swap image URLs while scrolling; rescan only after the user scrolled
+    // (DOM insertions are already handled by the MutationObserver above).
+    state.scrolled = false;
+    if (!state.onScroll) {
+      state.onScroll = () => { state.scrolled = true; };
+      window.addEventListener('scroll', state.onScroll, { capture: true, passive: true });
+    }
     state.scanTimer = setInterval(() => {
-      if (!state.panel) return;
+      if (!state.panel || document.hidden || !state.scrolled) return;
+      state.scrolled = false;
       if (mergePageMedia()) state.redraw?.();
-    }, 900);
+    }, 2000);
   }
 
   function mediaNode(item, className) {
@@ -900,9 +1080,10 @@
   function liveUrl(item) {
     if (!item) return '';
     if (item.temporary) return state.postUrl || item.url || '';
+    // Rewritten (guessed "original") URLs can 404 on some CDNs, so fall back to what the page really loaded.
     const src = item.element?.currentSrc;
-    if (src && /^https?:/i.test(src)) return src;
-    return item.url || '';
+    if (item.rewritten && src && /^https?:/i.test(src)) return src;
+    return item.url || src || '';
   }
 
   function fillItemActions(actions, item, extra = {}) {
@@ -1082,15 +1263,19 @@
     });
   }
 
-  function downloadBlob(blob, name) {
+  function downloadBlob(blob, name, done) {
     blob.arrayBuffer().then(buffer => {
       chrome.runtime.sendMessage({
         type: 'downloadBase64',
         base64: bytesToBase64(buffer),
         mime: blob.type || 'application/octet-stream',
         filename: `source-lens/${name}`
-      }, () => void chrome.runtime.lastError);
+      }, result => {
+        const err = chrome.runtime.lastError?.message;
+        done?.(!err && result?.ok !== false, err || result?.error);
+      });
     }).catch(() => {
+      done?.(true);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
@@ -1103,12 +1288,21 @@
   }
 
   function downloadName(item) {
-    const host = (location.hostname || 'web').replace(/^www\./, '');
-    const raw = fileName(item?.url) || item?.type || 'media';
-    const base = raw.replace(/\.[^.]+$/, '') || 'media';
-    const ext = (/\.([a-z0-9]{2,5})$/i.exec(raw) || [])[1]
-      || (item?.type === 'svg' ? 'svg' : item?.type === 'video' ? 'webm' : 'jpg');
-    return `${host}-${base}`.replace(/[^a-z0-9._-]+/gi, '-').slice(0, 70) + `.${ext}`;
+    return SL.downloadName(item, location.hostname);
+  }
+
+  function toast(text, kind) {
+    const root = uiRoot();
+    let el = root.querySelector('.sl-toast');
+    if (!el) {
+      el = document.createElement('div');
+      el.setAttribute('role', 'status');
+      root.append(el);
+    }
+    el.className = `sl-toast${kind === 'error' ? ' is-error' : ''}`;
+    el.textContent = text;
+    clearTimeout(state.toastTimer);
+    state.toastTimer = setTimeout(() => el.remove(), kind === 'error' ? 4200 : 2200);
   }
 
   function rememberCapture(items) {
@@ -1158,31 +1352,42 @@
     });
   }
 
-  function saveItem(item) {
-
-    if (item.type === 'svg' && item.code) {
-      downloadBlob(new Blob([item.code], { type: 'image/svg+xml' }), downloadName(item));
+  function saveItem(item, done) {
+    const name = downloadName(item);
+    const finish = (ok, err) => {
+      if (done) return done(ok, err);
+      if (ok) toast(`저장을 시작했습니다 · ${name}`);
+      else toast(err || '저장하지 못했습니다. 「새 탭」으로 연 뒤 직접 저장해 보세요.', 'error');
+    };
+    if (item.type === 'svg' && (item.code || svgSource(item))) {
+      downloadBlob(new Blob([item.code || svgSource(item)], { type: 'image/svg+xml' }), name, finish);
       return;
     }
-    const name = downloadName(item);
+    if (item.type === 'video' && (item.temporary || /^blob:/i.test(item.url || ''))) {
+      oneClickSaveVideo(item).then(r => finish(!!r?.ok, r?.error));
+      return;
+    }
     const url = liveUrl(item);
+    const locked = u => SL.SIGNED.test(u || '') || /cdninstagram|fbcdn\.net|scontent/i.test(u || '');
     if (/^https?:/i.test(url) && !item.temporary) {
       chrome.runtime.sendMessage({ type: 'downloadUrl', url, filename: `source-lens/${name}` }, result => {
-        if (result?.ok) return;
-        if (SL.SIGNED.test(url) || /cdninstagram|fbcdn\.net|scontent/i.test(url)) return;
-        fetchBytes(url).then(blob => downloadBlob(blob, name)).catch(() => {});
+        void chrome.runtime.lastError;
+        if (result?.ok) return finish(true);
+        if (locked(url)) return finish(false, '서명·만료가 걸린 주소라 저장되지 않았습니다. 페이지를 새로고침한 뒤 다시 시도해 보세요.');
+        fetchBytes(url).then(blob => downloadBlob(blob, name, finish)).catch(e => finish(false, `저장 실패: ${e.message || e}`));
       });
       return;
     }
-    if (SL.SIGNED.test(url || '') || /cdninstagram|fbcdn\.net|scontent/i.test(url || '')) return;
-    fetchBytes(item.url).then(blob => downloadBlob(blob, name)).catch(() => {
+    if (locked(url)) return finish(false, '서명·만료가 걸린 주소라 저장되지 않았습니다.');
+    fetchBytes(item.url).then(blob => downloadBlob(blob, name, finish)).catch(() => {
       if (state.postUrl) window.open(state.postUrl, '_blank', 'noopener');
+      finish(false, '이 항목은 바로 저장할 수 없습니다.');
     });
   }
 
   function copy(value, button) {
     const done = () => {
-      if (!button) return;
+      if (!button) { toast(String(value).includes('\n') ? `${String(value).split('\n').length}개 URL을 복사했습니다` : '복사했습니다'); return; }
       const prev = button.textContent;
       button.textContent = '복사됨';
       setTimeout(() => { button.textContent = prev; }, 1200);
@@ -1198,17 +1403,51 @@
     });
   }
 
+  const metaCache = new Map();
+  const metaQueue = [];
+  let metaActive = 0;
+  let metaObserver = null;
+
+  function pumpMeta() {
+    while (metaActive < 4 && metaQueue.length) {
+      const job = metaQueue.shift();
+      metaActive += 1;
+      const finish = result => { metaActive -= 1; job.resolve(result || {}); pumpMeta(); };
+      try {
+        chrome.runtime.sendMessage({ type: 'resourceMeta', url: job.url }, result => {
+          void chrome.runtime.lastError;
+          finish(result);
+        });
+      } catch { finish({}); }
+    }
+  }
+
+  function fetchMeta(url) {
+    if (metaCache.has(url)) return metaCache.get(url);
+    const pending = new Promise(resolve => { metaQueue.push({ url, resolve }); pumpMeta(); });
+    metaCache.set(url, pending);
+    if (metaCache.size > 600) metaCache.delete(metaCache.keys().next().value);
+    return pending;
+  }
+
   function hydrateMeta(item, node) {
     const apply = () => {
       const meta = node?.querySelector?.('.sl-meta');
-      if (!meta) return;
-      const dim = item.width && item.height ? `${item.width}×${item.height}` : '';
-      const size = item.size ? bytes(item.size) : '';
-      meta.textContent = [dim, item.mime || item.type, size, item.state].filter(Boolean).join(' · ');
+      if (meta) {
+        const dim = item.width && item.height ? `${item.width}×${item.height}` : '';
+        const size = item.size ? bytes(item.size) : '';
+        meta.textContent = [dim, item.mime || item.type, size, item.state].filter(Boolean).join(' · ');
+      }
+      const badge = node?.querySelector?.('.sl-dim');
+      if (badge) {
+        const px = item.width && item.height ? `${item.width}×${item.height}` : item.width ? `폭 ${item.width}px` : '';
+        badge.textContent = [px, item.size ? bytes(item.size) : ''].filter(Boolean).join(' · ');
+        badge.hidden = !badge.textContent;
+      }
     };
     apply();
-    if (!/^https?:/i.test(item.url || '')) return;
-    chrome.runtime.sendMessage({ type: 'resourceMeta', url: item.url }, result => {
+    if (!/^https?:/i.test(item.url || '') || (item.size && item.mime)) return;
+    const run = () => fetchMeta(item.url).then(result => {
       if (result?.size) item.size = result.size;
       if (result?.mime) {
         item.mime = result.mime.split(';')[0];
@@ -1217,6 +1456,17 @@
       }
       apply();
     });
+    if (!node || typeof IntersectionObserver !== 'function') { run(); return; }
+    if (!metaObserver) {
+      metaObserver = new IntersectionObserver(entries => entries.forEach(entry => {
+        if (!entry.isIntersecting) return;
+        metaObserver.unobserve(entry.target);
+        entry.target.__slMeta?.();
+        entry.target.__slMeta = null;
+      }), { rootMargin: '200px' });
+    }
+    node.__slMeta = run;
+    metaObserver.observe(node);
   }
 
   function imageBlob(item) {
@@ -1276,13 +1526,18 @@
     const close = document.createElement('button');
     close.className = 'sl-lightbox-close';
     close.textContent = '×';
-    close.onclick = () => layer.remove();
+    close.onclick = () => { layer.remove(); state.lightboxItem = null; };
+    close.title = '닫기 (Esc)';
+    state.lightboxItem = item;
     const prev = document.createElement('button');
     prev.className = 'sl-lightbox-nav sl-lightbox-prev';
     prev.textContent = '‹';
     const next = document.createElement('button');
     next.className = 'sl-lightbox-nav sl-lightbox-next';
     next.textContent = '›';
+    prev.title = '이전 (←)';
+    next.title = '다음 (→)';
+    if (items.length < 2) { prev.hidden = true; next.hidden = true; }
     prev.onclick = () => { layer.remove(); openLightbox(items[(index - 1 + items.length) % items.length], items, (index - 1 + items.length) % items.length); };
     next.onclick = () => { layer.remove(); openLightbox(items[(index + 1) % items.length], items, (index + 1) % items.length); };
     const preview = mediaNode(item, 'sl-lightbox-media');
@@ -1293,14 +1548,18 @@
     title.textContent = `${labelOf(item)} · ${item.state || ''}`;
     const page = document.createElement('div');
     page.className = 'sl-lightbox-page';
-    page.textContent = `${index + 1} / ${items.length}`;
+    page.textContent = `${index + 1} / ${items.length} · ← → 로 넘기기`;
     const actions = document.createElement('div');
     actions.className = 'sl-lightbox-actions';
     fillItemActions(actions, item, { onSlice: () => layer.remove() });
     card.append(title, page, actions);
     layer.append(card);
-    layer.onclick = ev => { if (ev.target === layer) layer.remove(); };
+    layer.onclick = ev => { if (ev.target === layer) { layer.remove(); state.lightboxItem = null; } };
+    uiRoot().querySelectorAll('.sl-lightbox').forEach(n => n.remove());
+    uiRoot().activeElement?.blur?.();
     uiRoot().append(layer);
+    layer.tabIndex = -1;
+    try { layer.focus({ preventScroll: true }); } catch { /* ignore */ }
   }
 
   async function openSliceEditor(item) {
@@ -1480,6 +1739,36 @@
     image.src = sourceUrl;
   }
 
+  function visibleList() {
+    const tab = state.activeTab;
+    if (tab === 'selected') {
+      const picked = state.picked || state.candidates[0];
+      return picked ? [picked] : [];
+    }
+    if (tab === 'video' && videoLocked()) return [];
+    let list = state.candidates.filter(item => item.type === tab);
+    if (tab === 'image' && state.minPx) list = list.filter(item => itemPixel(item) >= state.minPx);
+    const q = state.query.trim().toLowerCase();
+    if (q) {
+      const words = q.split(/\s+/);
+      list = list.filter(item => {
+        const hay = `${labelOf(item)} ${/^data:/i.test(item.url || '') ? '' : item.url} ${item.source || ''}`.toLowerCase();
+        return words.every(word => hay.includes(word));
+      });
+    }
+    if (state.sort === 'big' && tab !== 'svg') {
+      list = list.map((item, i) => ({ item, i, px: itemPixel(item) }))
+        .sort((a, b) => (b.px - a.px) || (a.i - b.i))
+        .map(row => row.item);
+    }
+    return list;
+  }
+
+  function bulkTargets(list) {
+    const chosen = list.filter(item => state.selectedKeys.has(itemKey(item)));
+    return chosen.length ? chosen : list;
+  }
+
   function render() {
     closePanel();
     const shadow = uiRoot();
@@ -1487,29 +1776,42 @@
     root.id = 'sl-root';
     const panel = document.createElement('section');
     panel.id = 'sl-panel';
+    panel.setAttribute('role', 'dialog');
+    panel.setAttribute('aria-label', 'Source Lens');
+    if (state.dock === 'left') panel.classList.add('is-left');
     root.append(panel);
     state.panel = root;
     shadow.append(root);
     const brand = (typeof sourceLensProfileFor === 'function' ? sourceLensProfileFor(location.hostname) : null)?.brand
       || { name: siteKind(), color: '#229968' };
-    const selected = state.picked || state.candidates[0];
     panel.innerHTML = `
-      <button class="sl-close" type="button" aria-label="닫기">×</button>
-      <header class="sl-header">
-        <div>
-          <h2>Source Lens <small class="sl-ver">0.9.0</small></h2>
-          <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
-        </div>
+      <header class="sl-topbar">
+        <h2>Source Lens <small class="sl-ver">${esc(VERSION)}</small></h2>
+        <span class="sl-platform" style="border-color:${esc(brand.color)};color:${esc(brand.color)}">${esc(brand.name)}</span>
+        <span class="sl-spacer"></span>
+        <button class="sl-icon-btn sl-dock" type="button" title="패널을 반대쪽으로 옮기기">⇆</button>
+        <button class="sl-icon-btn sl-close" type="button" title="닫기 (Esc)" aria-label="닫기">×</button>
       </header>
-      <nav class="sl-tabs">
-        <button data-tab="selected" class="active">선택</button>
-        <button data-tab="image">이미지 <b>0</b></button>
-        <button data-tab="video">영상 <b>0</b></button>
-        <button data-tab="svg">SVG <b>0</b></button>
+      <nav class="sl-tabs" role="tablist">
+        <button data-tab="selected" title="단축키 1">선택</button>
+        <button data-tab="image" title="단축키 2">이미지 <b>0</b></button>
+        <button data-tab="video" title="단축키 3">영상 <b>0</b></button>
+        <button data-tab="svg" title="단축키 4">SVG <b>0</b></button>
       </nav>
-      <main class="sl-main"></main>`;
+      <div class="sl-tools"></div>
+      <main class="sl-main"></main>
+      <footer class="sl-foot">Alt(⌥)+클릭: 다른 요소 분석 · <kbd>1</kbd>–<kbd>4</kbd> 탭 · <kbd>/</kbd> 검색 · <kbd>S</kbd> 저장 · <kbd>C</kbd> 복사 · <kbd>Esc</kbd> 닫기</footer>`;
     $('.sl-close', panel).onclick = closePanel;
+    $('.sl-dock', panel).onclick = () => {
+      state.dock = state.dock === 'left' ? 'right' : 'left';
+      panel.classList.toggle('is-left', state.dock === 'left');
+      savePrefs({ dock: state.dock });
+    };
+    const tools = $('.sl-tools', panel);
     const main = $('.sl-main', panel);
+    let rendered = new Set();
+    let grid = null;
+
     const updateCounts = () => {
       panel.querySelector('[data-tab="image"] b').textContent = state.candidates.filter(i => i.type === 'image').length;
       const videoBtn = panel.querySelector('[data-tab="video"]');
@@ -1517,143 +1819,284 @@
       else videoBtn.innerHTML = `영상 <b>${state.candidates.filter(i => i.type === 'video').length}</b>`;
       panel.querySelector('[data-tab="svg"] b').textContent = state.candidates.filter(i => i.type === 'svg').length;
     };
-    const draw = () => {
-      try {
-      main.textContent = '';
-      const selected = state.picked || state.candidates[0];
-      panel.querySelectorAll('.sl-tabs button').forEach(btn => btn.classList.toggle('active', btn.dataset.tab === state.activeTab));
-      updateCounts();
-      let list = state.activeTab === 'selected' ? (selected ? [selected] : []) : state.candidates.filter(i => i.type === state.activeTab);
-      if (state.activeTab === 'video' && videoLocked()) list = [];
-      if (state.activeTab === 'image' && state.filterLarge) {
-        list = list.filter(item => itemPixel(item) >= 400);
+
+    const updateBulk = () => {
+      const list = visibleList();
+      const chosen = list.filter(item => state.selectedKeys.has(itemKey(item))).length;
+      const set = (sel, text) => { const el = tools.querySelector(sel); if (el && !el.disabled) el.textContent = text; };
+      const n = chosen || list.length;
+      set('.sl-act-save', `저장 (${n})`);
+      set('.sl-act-zip', `ZIP (${Math.min(n, ZIP_MAX)})`);
+      set('.sl-act-copy', `URL 복사 (${n})`);
+      const all = tools.querySelector('.sl-select-all');
+      if (all) {
+        all.checked = list.length > 0 && chosen === list.length;
+        all.indeterminate = chosen > 0 && chosen < list.length;
       }
+      const note = tools.querySelector('.sl-select-note');
+      if (note) note.textContent = chosen ? `${chosen}개 선택됨 — 아래 버튼은 선택한 것만 처리` : `${list.length}개 · 체크해서 고르면 선택한 것만 처리`;
+      tools.querySelectorAll('.sl-bulk .sl-btn').forEach(btn => { if (!btn.dataset.busy) btn.disabled = !list.length; });
+    };
+
+    const makeTile = item => {
+      const tile = document.createElement('article');
+      tile.className = 'sl-tile';
+      const key = itemKey(item);
+      if (state.selectedKeys.has(key)) tile.classList.add('is-checked');
+      const check = document.createElement('label');
+      check.className = 'sl-check';
+      check.title = '선택';
+      const box = document.createElement('input');
+      box.type = 'checkbox';
+      box.checked = state.selectedKeys.has(key);
+      box.onchange = () => {
+        if (box.checked) state.selectedKeys.add(key); else state.selectedKeys.delete(key);
+        tile.classList.toggle('is-checked', box.checked);
+        updateBulk();
+      };
+      check.onclick = ev => ev.stopPropagation();
+      check.append(box);
+      tile.append(check);
+      const preview = mediaNode(item, 'sl-tile-preview');
+      if (preview) tile.append(preview);
+      const dim = document.createElement('span');
+      dim.className = 'sl-dim';
+      dim.hidden = true;
+      tile.append(dim);
+      tile.insertAdjacentHTML('beforeend', `<strong title="${esc(labelOf(item))}">${esc(labelOf(item))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
+      const quick = document.createElement('div');
+      quick.className = 'sl-quick';
+      const qb = (label, title, fn) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.textContent = label;
+        b.title = title;
+        b.onclick = ev => { ev.stopPropagation(); fn(ev.currentTarget); };
+        quick.append(b);
+      };
+      qb('저장', '이 파일 저장', () => saveItem(item));
+      qb('복사', 'URL 복사', btn => (item.type === 'svg' ? copySvg(item, btn) : copy(liveUrl(item), btn)));
+      tile.append(quick);
+      hydrateMeta(item, tile);
+      tile.onclick = () => {
+        const list = visibleList();
+        const index = Math.max(0, list.indexOf(item));
+        openLightbox(item, list, index);
+      };
+      rendered.add(key);
+      return tile;
+    };
+
+    const emptyText = () => {
+      if (state.activeTab === 'video') return videoEmptyMessage();
+      if (state.query.trim()) return `「${state.query.trim()}」에 맞는 항목이 없습니다. 검색어를 지워 보세요.`;
+      if (state.activeTab === 'svg') return '표시할 SVG가 없습니다. 아이콘을 직접 Alt(⌥)+클릭해 보세요.';
+      if (state.activeTab === 'image' && state.minPx) return `${state.minPx}px 이상 이미지가 없습니다. 크기 필터를 「모든 크기」로 바꿔 보세요.`;
+      if (state.activeTab === 'selected') return '분석한 요소가 없습니다. 이미지·영상을 Alt(⌥)+클릭하거나 「이미지」 탭을 보세요.';
+      return '표시할 미디어가 없습니다. 페이지를 스크롤해 이미지를 불러온 뒤 다시 확인하세요.';
+    };
+
+    const renderGrid = () => {
+      main.textContent = '';
+      rendered = new Set();
+      grid = null;
+      const list = visibleList();
       if (!list.length) {
-        const empty = state.activeTab === 'video'
-          ? videoEmptyMessage()
-          : state.activeTab === 'svg'
-            ? '표시할 SVG가 없습니다. 아이콘을 직접 Alt+클릭해 보세요.'
-            : state.filterLarge
-              ? '400px 이상 이미지가 없습니다. 「작은 것 숨기기」를 끄세요.'
-              : '표시할 미디어가 없습니다.';
         const box = document.createElement('div');
         box.className = 'sl-empty';
-        box.textContent = empty;
+        box.textContent = emptyText();
+        main.append(box);
+        updateBulk();
+        return;
+      }
+      grid = document.createElement('div');
+      grid.className = 'sl-grid';
+      list.forEach(item => grid.append(makeTile(item)));
+      main.append(grid);
+      updateBulk();
+    };
+
+    const drawTools = () => {
+      tools.textContent = '';
+      if (state.activeTab === 'selected') { tools.hidden = true; return; }
+      tools.hidden = false;
+      const row = document.createElement('div');
+      row.className = 'sl-filter-row';
+      const search = document.createElement('input');
+      search.type = 'search';
+      search.className = 'sl-search';
+      search.placeholder = '검색: 파일명·주소 ( / )';
+      search.value = state.query;
+      search.oninput = () => { state.query = search.value; renderGrid(); };
+      row.append(search);
+      if (state.activeTab === 'image') {
+        const size = document.createElement('select');
+        size.className = 'sl-select';
+        size.title = '작은 썸네일·아이콘 숨기기';
+        [[0, '모든 크기'], [200, '200px 이상'], [400, '400px 이상'], [800, '800px 이상']].forEach(([v, label]) => {
+          const o = document.createElement('option');
+          o.value = String(v);
+          o.textContent = label;
+          size.append(o);
+        });
+        size.value = String(state.minPx || 0);
+        size.onchange = () => { state.minPx = Number(size.value) || 0; savePrefs({ minPx: state.minPx }); renderGrid(); };
+        row.append(size);
+      }
+      if (state.activeTab !== 'svg') {
+        const sort = document.createElement('select');
+        sort.className = 'sl-select';
+        sort.title = '정렬';
+        [['big', '큰 것부터'], ['page', '페이지 순서']].forEach(([v, label]) => {
+          const o = document.createElement('option');
+          o.value = v;
+          o.textContent = label;
+          sort.append(o);
+        });
+        sort.value = state.sort;
+        sort.onchange = () => { state.sort = sort.value; savePrefs({ sort: state.sort }); renderGrid(); };
+        row.append(sort);
+      }
+      tools.append(row);
+
+      const pick = document.createElement('div');
+      pick.className = 'sl-pick-row';
+      pick.innerHTML = '<label><input type="checkbox" class="sl-select-all"> 전체 선택</label><span class="sl-select-note"></span>';
+      pick.querySelector('.sl-select-all').onchange = ev => {
+        const list = visibleList();
+        if (ev.target.checked) list.forEach(item => state.selectedKeys.add(itemKey(item)));
+        else list.forEach(item => state.selectedKeys.delete(itemKey(item)));
+        renderGrid();
+      };
+      tools.append(pick);
+
+      const bar = document.createElement('div');
+      bar.className = 'sl-bulk';
+      const mk = (cls, brandBtn) => {
+        const b = document.createElement('button');
+        b.type = 'button';
+        b.className = `sl-btn ${cls}${brandBtn ? ' sl-btn-brand' : ''}`;
+        bar.append(b);
+        return b;
+      };
+      const saveBtn = mk('sl-act-save', true);
+      saveBtn.onclick = async () => {
+        const targets = bulkTargets(visibleList()).slice(0, SAVE_MAX);
+        if (!targets.length) return;
+        saveBtn.disabled = true;
+        saveBtn.dataset.busy = '1';
+        let ok = 0, fail = 0;
+        for (let i = 0; i < targets.length; i++) {
+          saveBtn.textContent = `저장 ${i + 1}/${targets.length}`;
+          await new Promise(resolve => saveItem(targets[i], good => { if (good) ok += 1; else fail += 1; resolve(); }));
+          await new Promise(r => setTimeout(r, 250));
+        }
+        toast(fail ? `${ok}개 저장 시작 · ${fail}개 실패` : `${ok}개 저장을 시작했습니다`, fail && !ok ? 'error' : '');
+        delete saveBtn.dataset.busy;
+        saveBtn.disabled = false;
+        updateBulk();
+      };
+      const zipBtn = mk('sl-act-zip', false);
+      zipBtn.title = `한 파일로 묶어 저장 (최대 ${ZIP_MAX}개)`;
+      zipBtn.onclick = () => {
+        const targets = bulkTargets(visibleList());
+        if (targets.length > ZIP_MAX) toast(`ZIP은 최대 ${ZIP_MAX}개까지 묶습니다. 앞쪽 ${ZIP_MAX}개만 담습니다.`);
+        zipItems(targets, zipBtn);
+      };
+      const copyBtn = mk('sl-act-copy', false);
+      copyBtn.onclick = () => {
+        const urls = bulkTargets(visibleList()).map(item => liveUrl(item)).filter(u => u && !/^data:/i.test(u));
+        if (!urls.length) { toast('복사할 URL이 없습니다 (SVG 코드는 「코드 복사」를 쓰세요)', 'error'); return; }
+        copy(urls.join('\n'));
+      };
+      if (state.activeTab === 'svg') {
+        const codeBtn = mk('sl-act-code', false);
+        codeBtn.textContent = '코드 복사';
+        codeBtn.onclick = () => {
+          const codes = bulkTargets(visibleList()).map(item => svgSource(item)).filter(Boolean);
+          if (!codes.length) { toast('복사할 SVG 코드가 없습니다', 'error'); return; }
+          copy(codes.join('\n\n'));
+        };
+      }
+      tools.append(bar);
+    };
+
+    const drawSelected = () => {
+      main.textContent = '';
+      const item = (state.picked || state.candidates[0]);
+      if (!item) {
+        const box = document.createElement('div');
+        box.className = 'sl-empty';
+        box.textContent = emptyText();
         main.append(box);
         return;
       }
-      if (state.activeTab === 'selected') {
-        const item = list[0];
-        const preview = mediaNode(item, 'sl-preview');
-        if (preview) main.append(preview);
-        const card = document.createElement('article');
-        card.className = 'sl-primary';
-        card.innerHTML = `<div class="sl-kicker">대표 후보</div><strong>${esc(labelOf(item))}</strong>
-          <div class="sl-file-meta sl-meta">${esc(item.state)} · ${esc(item.mime || item.type)}</div>
-          <div class="sl-primary-actions"></div>`;
-        if (isTallItem(item)) {
-          const hint = document.createElement('p');
-          hint.className = 'sl-hint';
-          hint.textContent = '긴 상세 이미지입니다. 분할 편집으로 구간을 자를 수 있습니다.';
-          card.querySelector('.sl-file-meta').after(hint);
-        }
-        const actions = card.querySelector('.sl-primary-actions');
-        fillItemActions(actions, item, {
-          onUrl: ev => {
-            const existing = card.querySelector('.sl-url-value');
-            if (existing) {
-              existing.remove();
-              ev.currentTarget.textContent = 'URL 보기';
-              return;
-            }
-            const code = document.createElement('code');
-            code.className = 'sl-url-value';
-            code.textContent = liveUrl(item);
-            card.append(code);
-            ev.currentTarget.textContent = 'URL 숨기기';
-          },
-          onCodeView: ev => {
-            const existing = card.querySelector('.sl-svg-code');
-            if (existing) { existing.remove(); ev.currentTarget.textContent = '코드 보기'; return; }
-            const pre = document.createElement('pre');
-            pre.className = 'sl-url-value sl-svg-code';
-            pre.textContent = svgSource(item) || '코드를 불러오는 중…';
-            card.append(pre);
-            ev.currentTarget.textContent = '코드 숨기기';
-            if (!svgSource(item) && /\.svg(?:$|[?#])/i.test(item.url || '')) {
-              fetchBytes(item.url).then(blob => blob.text()).then(text => {
-                item.code = sanitizeSvg(text);
-                pre.textContent = item.code;
-              }).catch(() => { pre.textContent = item.url; });
-            }
-          }
-        });
-        hydrateMeta(item, card);
-        main.append(card);
-      } else {
-        const bar = document.createElement('div');
-        bar.className = 'sl-bulk';
-        const saveAll = document.createElement('button');
-        saveAll.type = 'button';
-        saveAll.className = 'sl-btn sl-btn-brand';
-        saveAll.textContent = `모두 저장 (${Math.min(list.length, 40)})`;
-        saveAll.onclick = async () => {
-          saveAll.disabled = true;
-          const targets = list.filter(item => itemPixel(item) >= 320 || !itemPixel(item)).slice(0, 40);
-          let n = 0;
-          for (const item of targets) {
-            saveItem(item);
-            n += 1;
-            saveAll.textContent = `저장 ${n}/${targets.length}`;
-            await new Promise(r => setTimeout(r, 450));
-          }
-          saveAll.textContent = `${targets.length}개 저장 요청`;
-          saveAll.disabled = false;
-        };
-        bar.append(saveAll);
-        const zipBtn = document.createElement('button');
-        zipBtn.type = 'button';
-        zipBtn.className = 'sl-btn sl-btn-brand';
-        zipBtn.textContent = 'ZIP 저장';
-        zipBtn.onclick = () => zipItems(list, zipBtn);
-        bar.append(zipBtn);
-        if (state.activeTab === 'image') {
-          const large = document.createElement('button');
-          large.type = 'button';
-          large.className = 'sl-btn' + (state.filterLarge ? ' is-on' : '');
-          large.textContent = state.filterLarge ? '작은 것 숨기는 중' : '작은 것 숨기기';
-          large.title = '150~320px 썸네일·프로필을 숨깁니다.';
-          large.onclick = () => { state.filterLarge = !state.filterLarge; draw(); };
-          bar.append(large);
-        }
-        if (state.activeTab === 'svg') {
-          const copyCodes = document.createElement('button');
-          copyCodes.type = 'button';
-          copyCodes.className = 'sl-btn';
-          copyCodes.textContent = '코드 모두 복사';
-          copyCodes.onclick = async () => {
-            const codes = list.map(item => svgSource(item)).filter(Boolean);
-            if (!codes.length) return;
-            await navigator.clipboard.writeText(codes.join('\n\n'));
-            copyCodes.textContent = `${codes.length}개 복사됨`;
-          };
-          bar.append(copyCodes);
-        }
-        main.append(bar);
-        const grid = document.createElement('div');
-        grid.className = 'sl-grid';
-        list.forEach((item, index) => {
-          const tile = document.createElement('article');
-          tile.className = 'sl-tile';
-          const preview = mediaNode(item, 'sl-tile-preview');
-          if (preview) tile.append(preview);
-          tile.insertAdjacentHTML('beforeend', `<strong>${esc(labelOf(item))}</strong><small>${esc(item.source)}</small><small class="sl-meta">${esc(item.state)}</small>`);
-          hydrateMeta(item, tile);
-          tile.onclick = () => openLightbox(item, list, index);
-          grid.append(tile);
-        });
-        main.append(grid);
+      const preview = mediaNode(item, 'sl-preview');
+      if (preview) main.append(preview);
+      const card = document.createElement('article');
+      card.className = 'sl-primary';
+      card.innerHTML = `<div class="sl-kicker">대표 후보 · ${esc(item.source || '')}</div><strong>${esc(labelOf(item))}</strong>
+        <div class="sl-file-meta sl-meta">${esc(item.state)} · ${esc(item.mime || item.type)}</div>
+        <div class="sl-primary-actions"></div>`;
+      if (isTallItem(item)) {
+        const hint = document.createElement('p');
+        hint.className = 'sl-hint';
+        hint.textContent = '긴 상세 이미지입니다. 분할 편집으로 구간을 자를 수 있습니다.';
+        card.querySelector('.sl-file-meta').after(hint);
       }
+      if (state.candidates.length > 1) {
+        const more = document.createElement('p');
+        more.className = 'sl-hint sl-hint-muted';
+        const n = state.candidates.filter(i => i.type === 'image').length;
+        more.textContent = `이 페이지에서 이미지 ${n}개를 더 찾았습니다. 「이미지」 탭(단축키 2)에서 한꺼번에 저장할 수 있어요.`;
+        card.append(more);
+      }
+      const actions = card.querySelector('.sl-primary-actions');
+      fillItemActions(actions, item, {
+        onUrl: ev => {
+          const existing = card.querySelector('.sl-url-value');
+          if (existing) {
+            existing.remove();
+            ev.currentTarget.textContent = 'URL 보기';
+            return;
+          }
+          const code = document.createElement('code');
+          code.className = 'sl-url-value';
+          code.textContent = liveUrl(item);
+          card.append(code);
+          ev.currentTarget.textContent = 'URL 숨기기';
+        },
+        onCodeView: ev => {
+          const existing = card.querySelector('.sl-svg-code');
+          if (existing) { existing.remove(); ev.currentTarget.textContent = '코드 보기'; return; }
+          const pre = document.createElement('pre');
+          pre.className = 'sl-url-value sl-svg-code';
+          pre.textContent = svgSource(item) || '코드를 불러오는 중…';
+          card.append(pre);
+          ev.currentTarget.textContent = '코드 숨기기';
+          if (!svgSource(item) && /\.svg(?:$|[?#])/i.test(item.url || '')) {
+            fetchBytes(item.url).then(blob => blob.text()).then(text => {
+              item.code = sanitizeSvg(text);
+              pre.textContent = item.code;
+            }).catch(() => { pre.textContent = item.url; });
+          }
+        }
+      });
+      hydrateMeta(item, card);
+      main.append(card);
+    };
+
+    const draw = () => {
+      try {
+        panel.querySelectorAll('.sl-tabs button').forEach(btn => {
+          const on = btn.dataset.tab === state.activeTab;
+          btn.classList.toggle('active', on);
+          btn.setAttribute('aria-selected', on ? 'true' : 'false');
+        });
+        updateCounts();
+        drawTools();
+        if (state.activeTab === 'selected') drawSelected();
+        else renderGrid();
       } catch (error) {
         const box = document.createElement('div');
         box.className = 'sl-empty';
@@ -1661,15 +2104,48 @@
         main.append(box);
       }
     };
-    panel.querySelectorAll('.sl-tabs button').forEach(btn => {
-      btn.onclick = () => { state.activeTab = btn.dataset.tab; draw(); };
-    });
-    state.redraw = () => {
-      if (state.activeTab === 'selected') { updateCounts(); return; }
+
+    state.switchTab = tab => {
+      if (state.activeTab !== tab) state.selectedKeys.clear();
+      state.activeTab = tab;
       draw();
+    };
+    panel.querySelectorAll('.sl-tabs button').forEach(btn => {
+      btn.onclick = () => state.switchTab(btn.dataset.tab);
+    });
+    state.focusSearch = () => {
+      const input = tools.querySelector('.sl-search');
+      if (input) { input.focus(); input.select(); }
+    };
+    // Called when new media shows up on the page: append new tiles instead of
+    // rebuilding everything, so scroll position and selections stay put.
+    state.redraw = () => {
+      updateCounts();
+      if (state.activeTab === 'selected') return;
+      if (!grid) { renderGrid(); return; }
+      visibleList().forEach(item => {
+        if (!rendered.has(itemKey(item))) grid.append(makeTile(item));
+      });
+      updateBulk();
     };
     draw();
     startPageWatch();
+  }
+
+  function openPagePanel(preferTab) {
+    try { document.documentElement.dispatchEvent(new CustomEvent('sl-extract-now')); } catch { /* ignore */ }
+    state.selected = null;
+    state.selectedMedia = null;
+    state.postUrl = postUrl(document.body);
+    state.candidates = dedupe([...collectPageMedia(), ...(state.platformMedia || [])])
+      .filter(item => item && !(item.type === 'video' && SL.isImageUrl(item.url)));
+    const images = state.candidates.filter(i => i.type === 'image');
+    state.picked = images.slice().sort((a, b) => itemPixel(b) - itemPixel(a))[0] || state.candidates[0] || null;
+    const count = type => state.candidates.filter(i => i.type === type).length;
+    state.activeTab = preferTab || (count('image') ? 'image' : count('video') ? 'video' : count('svg') ? 'svg' : 'image');
+    state.selectedKeys.clear();
+    render();
+    requestFrameMedia();
   }
 
   function collectArticle(target) {
@@ -1708,7 +2184,7 @@
     if (!clickedSvg) extras.push(...collectArticle(target));
     const seenVideo = new Set();
     let list = rank(dedupe([...seed, ...collected.candidates, ...extras]), collected.media)
-      .filter(item => item && !(SL.isUiJunk(item.url) && item.type !== 'svg'));
+      .filter(item => item && !(SL.isUiJunk(item.url) && item.type !== 'svg' && item.relation !== 'target'));
     if (clickedSvg) list = list.filter(item => item.type === 'svg');
     else if (clickedVideo) {
       const videos = list.filter(item => {
@@ -1725,7 +2201,7 @@
       const svgs = list.filter(item => item.type === 'svg');
       list = [...https.slice(0, 2), ...blobs, ...poster, ...svgs];
     } else {
-      list = list.filter(item => (item.type === 'image' && SL.isImageUrl(item.url)) || item.type === 'svg');
+      list = list.filter(item => (item.type === 'image' && (SL.isImageUrl(item.url) || item.relation === 'target' || item.element?.tagName === 'IMG')) || item.type === 'svg');
     }
     state.picked = list.find(item => !isChromeImage(item.element, item.url)) || list[0] || null;
 
@@ -1751,26 +2227,57 @@
     }
     render();
     requestFrameMedia();
-    if (clickedVideo && state.picked?.type === 'video') oneClickSaveVideo(state.picked);
+    if (clickedVideo && state.picked?.type === 'video' && state.autoVideo) oneClickSaveVideo(state.picked);
   }
 
+  const fromOurUi = ev => ev.target === state.host || !!ev.target?.closest?.('#sl-host');
+
   window.addEventListener('mousedown', ev => {
-    if (ev.altKey && ev.button === 0 && ev.target !== state.host && !ev.target.closest?.('#sl-host')) {
+    if (!state.altClick) return;
+    if (ev.altKey && ev.button === 0 && !fromOurUi(ev)) {
       ev.preventDefault();
       ev.stopImmediatePropagation();
     }
   }, true);
 
+  function clickTarget(ev) {
+    // Media inside open shadow DOM is invisible to elementsFromPoint; use the real event path.
+    const deep = ev.composedPath?.()[0];
+    if (deep && deep.nodeType === 1 && deep.getRootNode?.() !== document) {
+      const media = deep.closest?.('img,video,svg,picture');
+      if (media) return media;
+    }
+    return mediaAtPoint(ev.clientX, ev.clientY);
+  }
+
   window.addEventListener('click', ev => {
-    if (!ev.altKey || ev.button !== 0 || ev.target === state.host || ev.target.closest?.('#sl-host')) return;
+    if (!state.altClick) return;
+    if (!ev.altKey || ev.button !== 0 || fromOurUi(ev)) return;
     ev.preventDefault();
     ev.stopImmediatePropagation();
-    inspect(mediaAtPoint(ev.clientX, ev.clientY));
+    inspect(clickTarget(ev));
   }, true);
 
+  window.addEventListener('mousemove', ev => {
+    state.lastPoint = { x: ev.clientX, y: ev.clientY, t: Date.now() };
+  }, { capture: true, passive: true });
+
   document.addEventListener('contextmenu', ev => {
-    state.contextTarget = ev.target?.closest?.('img,video,svg,a') || ev.target;
+    const deep = ev.composedPath?.()[0];
+    const base = deep && deep.nodeType === 1 ? deep : ev.target;
+    state.contextTarget = base?.closest?.('img,video,svg,a') || base;
   }, true);
+
+  function hotkeyInspect() {
+    if (state.panel) { closePanel(); return; }
+    const p = state.lastPoint;
+    if (p && Date.now() - p.t < 120000) {
+      const target = mediaAtPoint(p.x, p.y);
+      const isMedia = target?.matches?.('img,video,svg,picture') || target?.closest?.('img,video,svg,picture');
+      if (target && (isMedia || collectTarget(target).candidates.length)) { inspect(target); return; }
+    }
+    openPagePanel();
+  }
 
   window.addEventListener('message', ev => {
     if (!ev.data?.sourceLens) return;
@@ -1786,9 +2293,10 @@
     }
     if (window !== window.top) return;
     if (ev.data.type === 'pageMedia' && Array.isArray(ev.data.data)) {
+      if (!state.panel) return;
       const have = new Set(state.candidates.map(itemKey));
       ev.data.data.forEach(item => {
-        if (!item?.url) return;
+        if (!item?.url || typeof item.url !== 'string') return;
         const key = itemKey(item);
         if (have.has(key)) return;
         have.add(key);
@@ -1797,7 +2305,7 @@
       state.redraw?.();
       return;
     }
-    if (ev.data.type !== 'open') return;
+    if (ev.data.type !== 'open' || ev.origin !== location.origin) return;
     state.candidates = ev.data.data?.candidates || [];
     state.picked = ev.data.data?.picked || state.candidates[0] || null;
     state.postUrl = ev.data.data?.postUrl || '';
@@ -1810,25 +2318,74 @@
       sendResponse(listPageMedia());
       return true;
     }
+    if (message?.type === 'ping') {
+      sendResponse({ ok: true, version: VERSION });
+      return true;
+    }
+    if (message?.type === 'openPanel') {
+      if (window !== window.top) return;
+      openPagePanel(message.tab);
+      sendResponse({ ok: true });
+      return true;
+    }
+    if (message?.type === 'hotkeyInspect') {
+      if (window !== window.top) return;
+      hotkeyInspect();
+      sendResponse({ ok: true });
+      return true;
+    }
     if (message?.type === 'oneClickVideo') {
+      if (window !== window.top) return;
       oneClickSaveVideo(null, null).then(sendResponse);
       return true;
     }
     if (message?.type !== 'contextInspect') return;
     const target = state.contextTarget || mediaAtPoint(innerWidth / 2, innerHeight / 2);
     const seed = message.info?.srcUrl
-      ? [candidate(message.info.srcUrl, '우클릭 URL', message.info.mediaType === 'video' ? 'video' : 'image', { confidence: '최상' })]
+      ? [candidate(message.info.srcUrl, '우클릭 URL', message.info.mediaType === 'video' ? 'video' : 'image', { confidence: '최상', allowJunk: true })]
       : [];
     inspect(target, seed);
   });
 
   window.addEventListener('keydown', ev => {
-    if (ev.key === 'Escape') { closePanel(); return; }
+    const root = state.shadow;
+    const slice = root?.querySelector('.sl-slice-editor');
+    const box = root?.querySelector('.sl-lightbox');
+    if (!state.panel && !slice && !box) return;
+    const target = ev.composedPath?.()[0] || ev.target;
+    const inOurUi = target?.getRootNode?.() === root;
+    if (SL.isTypingTarget(target)) {
+      if (inOurUi && ev.key === 'Escape') {
+        if (target.value) { target.value = ''; target.dispatchEvent(new Event('input')); }
+        else target.blur();
+        ev.preventDefault();
+        ev.stopPropagation();
+      }
+      return;
+    }
+    if (ev.key === 'Escape') {
+      if (slice) slice.querySelector('.sl-slice-close')?.click();
+      else if (box) { box.remove(); state.lightboxItem = null; }
+      else closePanel();
+      ev.stopPropagation();
+      return;
+    }
+    if (ev.ctrlKey || ev.metaKey || ev.altKey || slice) return;
+    if (box && (ev.key === 'ArrowLeft' || ev.key === 'ArrowRight')) {
+      box.querySelector(ev.key === 'ArrowLeft' ? '.sl-lightbox-prev' : '.sl-lightbox-next')?.click();
+      ev.preventDefault();
+      ev.stopPropagation();
+      return;
+    }
     if (!state.panel) return;
-    if (ev.target && /INPUT|TEXTAREA|SELECT/.test(ev.target.tagName)) return;
     const tabs = { 1: 'selected', 2: 'image', 3: 'video', 4: 'svg' };
-    if (tabs[ev.key]) { state.activeTab = tabs[ev.key]; state.redraw?.(); }
-    if ((ev.key === 's' || ev.key === 'S') && state.picked) saveItem(state.picked);
-    if ((ev.key === 'c' || ev.key === 'C') && state.picked) copy(state.picked.url);
-  });
+    if (!box && tabs[ev.key]) { state.switchTab?.(tabs[ev.key]); ev.stopPropagation(); return; }
+    if (!box && ev.key === '/') { ev.preventDefault(); ev.stopPropagation(); state.focusSearch?.(); return; }
+    const current = state.lightboxItem || state.picked;
+    if ((ev.key === 's' || ev.key === 'S') && current) { saveItem(current); ev.stopPropagation(); }
+    if ((ev.key === 'c' || ev.key === 'C') && current) {
+      if (current.type === 'svg') copySvg(current); else copy(liveUrl(current));
+      ev.stopPropagation();
+    }
+  }, true);
 })();
